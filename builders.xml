@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="Enron.MakeJar" basedir=".">
+	<target name="MakeJar" description="Create a jar for the Enron project.">
+		<jar jarfile="target/Enron.jar" basedir="bin" />
+	</target>
+	<target name="Scaladoc">
+		<exec executable="cmd">
+			<arg value="/c" />
+			<arg value="scaladoc.bat" />
+		    <arg value="-classpath"/>
+		    <arg value="external/connector-j/mysql-connector-java-5.1.18-bin.jar"/>
+			<arg value="-d" />
+			<arg value="docs" />
+			<arg value="src/org/spiffy/db/*.scala" />
+		</exec>
+	</target>
+	<target name="MakeDocsJar" description="Create a jar for the Enron API documentation.">
+		<jar jarfile="target/EnronDocs.jar" basedir="docs" />
+	</target>
+	<target name="SuperClean">
+		<delete>
+			<fileset dir="target">
+			</fileset>
+			<fileset dir="docs">
+			</fileset>
+		</delete>
+	</target>
+</project>
