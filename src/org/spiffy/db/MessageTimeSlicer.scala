@@ -8,45 +8,77 @@ import java.util.{Calendar, Date, GregorianCalendar}
 
 object MessageTimeSlicer 
 {
+  /** The real name (or e-mail prefix if not known) of a person and the e-mail domain of their address. */
+  class Person(val name: String, val domain: String) 
+  {
+    override def toString = "Person -- Name: " + name + "  Domain: " + domain  
+  }
+  
   /** Usage statistics on the number of e-mails involving a specific person. 
     * @constructor
     * @param sent The number of messages sent.
     * @param received The number of message received. */
-  class Activity(val sent: Long, val received: Long) 
+  class Activity(val sent: Long, val received: Long)
+    extends Ordered[Activity]
   {
+    def compare(that: Activity): Int = total compare that.total
+    
     /** The total number e-mails sent and received by the person. */
     def total = sent + received
     
     override def toString = "(" + sent + ":" + received + ")"  
   }
   
+  /** Usage statistics for all people sending e-mails from a given e-mail domain.
+   * @constructor
+   * @param domain The name of the domain portion of the e-mail address.
+   * @param activity The e-mail statistics for each person active during the period indexed by unique ID of person (people.personid). 
+   * @param others The unique IDs (people.personid) of all people grouped into the other (ID=0) activity category. */
+  class ActiveDomain(val domain: String, val activity: TreeMap[Long,Activity], others: TreeSet[Long])
+    extends Ordered[ActiveDomain]
+  {
+    def compare(that: ActiveDomain): Int = domain compare that.domain
+    
+    /** Is the person (identified by unique ID) included in this domain. */
+    def isPerson(id: Long): Boolean = activity.contains(id) || others.contains(id) 
+   
+    /** The total number of people included in this domain. */
+    val people = activity.size + others.size
+    
+    /** The total number e-mails sent and received from this domain. */
+    val total = activity.values.map(_.total).reduce(_ + _)
+    
+    override def toString = {
+      domain + " -- Important People: " + activity.size + "  Others: " + others.size + "  Total E-Mails: " + total  
+    }
+  }
+  
   /** Usage statistics for all people sending e-mails in a given period.
    * @constructor
    * @param stamp Time stamp of start of period (in UTC milliseconds).
-   * @param activity The e-mail statistics for each person active during the period indexed by unique ID of person (people.personid). 
-   * @param others The unique IDs (people.personid) of all people grouped into the other (ID=0) activity category. */
-  class ActivePeriod(val stamp: Long, val activity: TreeMap[Long,Activity], others: TreeSet[Long])
+   * @param domains Activity from each e-mail address domain. */
+  class ActivePeriod(val stamp: Long, val domains: TreeSet[ActiveDomain])
     extends Ordered[ActivePeriod]
   {
     def compare(that: ActivePeriod): Int = stamp compare that.stamp
     
     /** Is the person (identified by unique ID) included in these activity statistics. */
-    def isPerson(id: Long): Boolean = activity.contains(id) || others.contains(id) 
+    def isPerson(id: Long): Boolean = domains.exists(_.isPerson(id))
    
     /** The total number of people included in the period. */
-    val people = activity.size + others.size
+    val people = domains.map(_.people).reduce(_ + _)
     
     /** The total number e-mails sent and received during the period. */
-    val total = activity.values.map(_.total).reduce(_ + _)
+    val total = domains.map(_.total).reduce(_ + _)
     
     override def toString = {
       val cal = new GregorianCalendar
       cal.setTimeInMillis(stamp)
-      cal.getTime + " -- People: " + activity.size + "  Others: " + others.size + "  E-Mails: " + total  
+      cal.getTime + " -- Domains: " + domains.size + "  Total People: " + people + "  E-Mails: " + total  
     }
   }
   
-  /** A counter of e-mails for a given time period and person. */
+  /** A counter of e-mails for a given time period and unique person ID. */
   class MailBucket 
     extends HashMap[Long, HashMap[Long,Long]]
   {
@@ -79,29 +111,40 @@ object MessageTimeSlicer
         val range @ (firstMonth, lastMonth) = {
           val threshold = 10000
     	  val perMonth = activeMonths(conn, threshold)
+    	  
+    	  // Debug
           for((ms, cnt) <- perMonth) {
             cal.setTimeInMillis(ms)
 	        print((cal.get(Calendar.MONTH) + 1) + "/" + cal.get(Calendar.YEAR) + "=" + cnt + " ")
     	  }
+          // Debug
+          
     	  (perMonth.firstKey, perMonth.lastKey)
         }
         
         println        
         println("Gathering Per-User Stats for each Week: ")
-        val stats = {
+        val (people, stats) = {
           val threshold = 2
           val percent = 0.005
           val interval = 14*24*60*60*1000 // 2-weeks
-          val s = activity(conn, range, interval, threshold, percent) 
+          val rtn @ (_, s) = activity(conn, range, interval, threshold, percent)
+          
+          // Debug
           for(w <- s) {
             println(w)
-            for((id, a) <- w.activity)
-              print(" " + id + ":" + a + "[%.6f]".format(a.total.toDouble/w.total.toDouble))
-            println
+            for(d <- w.domains) {
+              println("  " + d)
+              print("   ")
+              for((id, a) <- d.activity)
+                print(" " + id + ":" + a + "[%.6f]".format(a.total.toDouble/w.total.toDouble))
+              println
+            }
           }
-          s
+          // Debug
+          
+          rtn
         }
-        
         
         // ...
         
@@ -158,37 +201,94 @@ object MessageTimeSlicer
     * @param interval The number of milliseconds in each time period.
     * @param threshold The minimum number of sent e-mails needed for inclusion.
     * @param percent The minimum portion (0.0-1.0) of total e-mail activity needed for individual status. */
-  def activity(conn: Connection, range: (Long, Long), interval: Long, threshold:  Long, percent: Double): TreeSet[ActivePeriod] = {
+  def activity(conn: Connection, 
+               range: (Long, Long), 
+               interval: Long, 
+               threshold:  Long, 
+               percent: Double): (TreeMap[Long,Person], TreeSet[ActivePeriod]) = {
     val cal = new GregorianCalendar
 	val (first, last) = range
 	
     val sent = new MailBucket
     val recv = new MailBucket
     
-	val st = conn.createStatement
-    val rs = st.executeQuery(
-      "SELECT messagedt, senderid, personid FROM recipients, messages " + 
-      "WHERE recipients.messageid = messages.messageid")
-    while(rs.next) {
-      try {
-        val ts = rs.getTimestamp(1)
-        val sid = rs.getInt(2)
-        val rid = rs.getInt(3)
+    // Get the per-user sent/receive counts for each time interval.
+	{
+       val st = conn.createStatement
+       val rs = st.executeQuery(
+         "SELECT messagedt, senderid, personid FROM recipients, messages " + 
+         "WHERE recipients.messageid = messages.messageid")
+      while(rs.next) {
+        try {
+          val ts = rs.getTimestamp(1)
+          val sid = rs.getInt(2)
+          val rid = rs.getInt(3)
         
-        cal.setTime(ts)
-        val ms = cal.getTimeInMillis
+          cal.setTime(ts)
+          val ms = cal.getTimeInMillis
         
-        if((first <= ms) && (ms <= last)) {
-          val head = ms - ((ms - first) % interval)
-          sent.inc(head, sid)
-          recv.inc(head, rid)
+          if((first <= ms) && (ms <= last)) {
+            val head = ms - ((ms - first) % interval)
+            sent.inc(head, sid)
+            recv.inc(head, rid)
+          }
+        } 
+        catch {
+          case _: SQLException => // Ignore invalid time stamps.
         }
       }
-      catch {
-        case _: SQLException => // Ignore invalid time stamps.
-      }
-    }
+	}
 
+    // Lookup the names of all the users and split their e-mail addresses into name/domain.
+    val people = {
+      var rtn = new TreeMap[Long,Person]
+      
+      val st = conn.createStatement
+      val rs = st.executeQuery("SELECT personid, email, name FROM people")
+      while(rs.next) {
+        try {
+          val pid = rs.getInt(1)
+          val addr = rs.getString(2)
+          val nm = rs.getString(3)
+          
+          val (prefix, domain) = 
+            if(addr == null) ("unknown", "unknown")
+            else {
+              addr.filter(_ != '"').split("@") match {
+                case Array(p, d) => (p, d) 
+                case _ => (addr, "unknown")
+              }
+            }
+          
+          val name = 
+            if(nm != null) {
+              val n = nm.filter(_ != '"') 
+              if(n.size > 0) n else prefix 
+            }
+            else prefix
+          
+          // Toss out bogus e-mails.
+          (name, domain) match {
+            case ("e-mail", "enron.com") =>
+            case ("unknown", _) => 
+            case (_, "unknown") => 
+            case _ => rtn = rtn + (pid.toLong -> new Person(name, domain))
+          }
+        } 
+        catch {
+          case _: SQLException => // Ignore invalid people.
+        }
+      }
+      
+      rtn
+	}
+        	 
+    // Debug
+    println("People:")
+    for((pid, p) <- people) 
+      println("  " + pid + " = " + p)
+    // Debug
+                      
     var weeks = new TreeSet[ActivePeriod]
     for(ms <- new TreeSet[Long]() ++ sent.keySet) {  // sent and recv must have same keys 
       var act = new TreeMap[Long,Activity] 
@@ -199,13 +299,22 @@ object MessageTimeSlicer
     	  act = act + (id -> new Activity(s, r)) 
       }
       
-      val all = new ActivePeriod(ms, act, new TreeSet)
-      val (important, others) = act.partition{ case(id, a) => (a.total.toDouble / all.total.toDouble) > percent } 
-      val (osent, orecv) = ((0L, 0L) /: others){ case ((s, r), (_, a)) => (s+a.sent, r+a.received) }
+      val byDomain = act.filter{ case (id, _) => people.contains(id)}.groupBy{ case (id, _) => people(id).domain }
+      val total = byDomain.map{ case (_, dact) => dact.values.map(_.total).reduce(_ + _) }.reduce(_ + _).toDouble	
       
-      weeks = weeks + new ActivePeriod(ms, important + (0L -> new Activity(osent, orecv)), (new TreeSet[Long]) ++ others.keySet)
+      var domains = new TreeSet[ActiveDomain]
+      for((dname, dact) <- byDomain) {
+        val (important, others) = dact.partition{ case(id, a) => (a.total.toDouble / total) > percent } 
+        val (osent, orecv) = ((0L, 0L) /: others){ case ((s, r), (_, a)) => (s+a.sent, r+a.received) }        
+        if(!important.isEmpty && !others.isEmpty) {
+          domains = domains + 
+            new ActiveDomain(dname, important + (0L -> new Activity(osent, orecv)), (new TreeSet[Long]) ++ others.keySet)
+        }
+      }
+      
+      weeks = weeks + new ActivePeriod(ms, domains) 
     }
     
-    weeks
+    (people, weeks)
   }
 }
