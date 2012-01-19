@@ -12,7 +12,7 @@ object TestConnect {
       val conn = DriverManager.getConnection(connStr)
       try {
         // Configure to be Read Only
-        val statement = conn.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)
+        val statement = conn.createStatement()
 
         // Execute Query
         val rs = statement.executeQuery("SELECT body FROM bodies LIMIT 3")
