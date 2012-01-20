@@ -1,7 +1,7 @@
 package org.spiffy.db
 
 import org.scalagfx.io.Path
-import org.scalagfx.math.{Pos3d, Index3i}
+import org.scalagfx.math.{Pos2d, Pos3d, Index3i, Frame2d}
 import org.scalagfx.houdini.geo.GeoWriter
 
 import collection.mutable.HashMap
@@ -41,11 +41,11 @@ object MessageTimeSlicer {
   /**
    * Usage statistics for all people sending e-mails from a given e-mail domain.
    * @constructor
-   * @param domain The name of the domain portion of the e-mail address.
+   * @param dname The name of the domain portion of the e-mail address.
    * @param activity The e-mail statistics for each person active during the period indexed by unique ID of person (people.personid).
    * @param others The unique IDs (people.personid) of all people grouped into the other (ID=0) activity category.
    */
-  class ActiveDomain(val domain: String, val activity: TreeMap[Long, Activity], others: TreeSet[Long])
+  class ActiveDomain(val dname: String, val activity: TreeMap[Long, Activity], others: TreeSet[Long])
     extends Ordered[ActiveDomain] {
     def compare(that: ActiveDomain): Int = total compare that.total
 
@@ -61,8 +61,8 @@ object MessageTimeSlicer {
     private val offsets = {
        var rtn = new TreeMap[Long, Long]
         var cnt = 0L
-        for(a <- (new TreeSet[Activity]) ++ activity.values) {
-          rtn = rtn + (a.id -> cnt)
+        for((pid, a) <- activity) {
+          rtn = rtn + (pid -> cnt)
           cnt = cnt +  a.total
         }
         rtn
@@ -72,7 +72,7 @@ object MessageTimeSlicer {
     def offset(id: Long): Long = offsets(id) 
     
     override def toString = {
-      domain + " -- People: " + activity.size + "  Others: " + others.size + "  E-Mails: " + total
+      dname + " -- People: " + activity.size + "  Others: " + others.size + "  E-Mails: " + total
     }
   }
 
@@ -100,7 +100,7 @@ object MessageTimeSlicer {
       var cnt = 0L
       var rtn = 0L
       for(d <- domains) {
-        if(d.domain == dname) 
+        if(d.dname == dname) 
           rtn = cnt
         cnt = cnt + d.total
       }
@@ -398,8 +398,23 @@ object MessageTimeSlicer {
     println("Writing: " + path)
 	val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
-      val pts = List(Pos3d(-1.0, -1.0, 0.0), Pos3d(1.0, -1.0, 0.0), Pos3d(1.0, 1.0, 0.0), Pos3d(-1.0, 1.0, 0.0)) 
-      val idxs = List(Index3i(0, 2, 1), Index3i(0, 3, 2))
+      val tpi = scala.math.Pi * 2.0
+      val (r0, r1) = (0.9, 1.1)
+      val total = period.total.toDouble
+      
+      var pts = List[Pos3d]()
+      var idxs = List[Index3i]()
+      var pc = 0
+      for(dom <- period.domains) {
+        val doff = period.offset(dom.dname)
+        for((pid, act) <- dom.activity) {
+          val off = dom.offset(pid) + doff
+          val frames = List(off, off+act.sent, off+act.total).map(_.toDouble / total).map(t => Frame2d.rotate(t * tpi))
+          for(f <- frames) pts = (f xform Pos2d(r0, 0.0)).toPos3d :: (f xform Pos2d(r1, 0.0)).toPos3d :: pts
+          idxs = Index3i(pc+5, pc+4, pc+2) :: Index3i(pc+3, pc+5, pc+2) :: Index3i(pc+1, pc+3, pc+2) :: Index3i(pc+0, pc+1, pc+2) :: idxs
+          pc = pc + 6
+        }
+      }
       
       val geo = GeoWriter(pts.size, idxs.size)
       geo.writeHeader(out)
