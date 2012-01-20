@@ -3,6 +3,7 @@
 	<name>Enron</name>
 	<comment></comment>
 	<projects>
+		<project>Graphics</project>
 	</projects>
 	<buildSpec>
 		<buildCommand>
