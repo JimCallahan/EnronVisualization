@@ -195,8 +195,6 @@ object PeopleBucketer {
 
   /** Top level method. */
   def main(args: Array[String]) {
-    val outdir = Path("./artwork/houdini/geo")
-
     try {
       val cal = new GregorianCalendar
       val connStr = "jdbc:mysql://localhost:3306/enron?user=enron&password=slimyfucks"
@@ -272,122 +270,64 @@ object PeopleBucketer {
 
         println
         println("Compute Personal Totals...")
-        val personal = bucket.totalPersonalActivity
 
-        {
+        val numPeople = 100
+
+        val personal = {
+          val tpa = bucket.totalPersonalActivity
+
           val path = Path("./data/stats/personalActivity.csv")
           println("  Writing: " + path)
           val out = new BufferedWriter(new FileWriter(path.toFile))
           try {
             out.write("PERSON ID,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,NAME,\n")
-            for (pa <- personal)
+            for (pa <- tpa)
               out.write(pa.pid + "," + pa.total + "," + pa.sent + "," + pa.recv + "," + people(pa.pid).name + ",\n")
           } finally {
             out.close
           }
-        }
-
-        //---------------------------------------------------------------------------------------------------
-
-        println
-        println("Extract Activity of Most Active People...")
-        
-        {
-          var ma = new TreeMap[Long, Array[Activity]]
-
-          var c = 0
-          for (pa <- personal.take(300)) {
-            if(c%10 == 0)
-              ma = ma + (pa.pid -> bucket.personalActivity(pa.pid))
-            c = c + 1
-          }
-
-          val path = Path("./data/stats/mostActivePeople.csv")
-          println("  Writing: " + path)
-          val out = new BufferedWriter(new FileWriter(path.toFile))
-          try {
-            val (_, first) = ma.first
-            for(i <- 0 until first.size) {
-              for (ary <- ma.values) 
-                out.write(ary(i).total + ",")
-              out.write("\n")
-            }
-          } finally {
-            out.close
-          } 
-        }
-
-        //---------------------------------------------------------------------------------------------------
-
-        println
-        println("Extract Activity of Most Active People...")
-        
-        {
-          val mostActivePeople = 300
-          val selectEvery = 10
           
-          var ma = new TreeMap[Long, Array[Activity]]
-
-          var c = 0
-          for (pa <- personal.take(mostActivePeople)) {
-            if(c%selectEvery == 0)
-              ma = ma + (pa.pid -> bucket.personalActivity(pa.pid))
-            c = c + 1
-          }
-
-          val path = Path("./data/stats/mostActivePeople.csv")
-          println("  Writing: " + path)
-          val out = new BufferedWriter(new FileWriter(path.toFile))
-          try {
-            val (_, first) = ma.first
-            for(i <- 0 until first.size) {
-              for (ary <- ma.values) 
-                out.write(ary(i).total + ",")
-              out.write("\n")
-            }
-          } finally {
-            out.close
-          } 
+          tpa.take(numPeople)
         }
 
         //---------------------------------------------------------------------------------------------------
 
         println
         println("Extract Average Activity of Most Active People...")
-        
-        {
-          val mostActivePeople = 300
-          val selectEvery = 10
+
+        val avgActivity = {
           val samples = 30
-
-          var ma = new TreeMap[Long, Array[AverageActivity]]
-
-          var c = 0
-          for (pa <- personal.take(mostActivePeople)) {
-            if(c%selectEvery == 0)
-              ma = ma + (pa.pid -> bucket.personalAverageActivity(pa.pid, samples))
-            c = c + 1
-          }
+          
+          var aa = new TreeMap[Long, Array[AverageActivity]]
+          
+          for (pa <- personal)
+        	aa = aa + (pa.pid -> bucket.personalAverageActivity(pa.pid, samples))
 
           val path = Path("./data/stats/mostActiveAveragePeople.csv")
           println("  Writing: " + path)
           val out = new BufferedWriter(new FileWriter(path.toFile))
           try {
-            val (_, first) = ma.first
+            val (_, first) = aa.first
             for(i <- 0 until first.size) {
-              for (ary <- ma.values) 
+              for (ary <- aa.values) 
                 out.write("%.8f,".format(ary(i).total))
               out.write("\n")
             }
           } finally {
             out.close
-          } 
+          }
+          
+          aa
         }
 
         
-        
-        
-        
+        //---------------------------------------------------------------------------------------------------
+
+        println
+        println("Generating Personal Activity Geometry...")
+
+        generatePersonalActivityGeo(Path("./artwork/houdini/geo"), 100, personal, avgActivity)
+
         
         //---------------------------------------------------------------------------------------------------
         
@@ -536,6 +476,86 @@ object PeopleBucketer {
     }
 
     bucket
+  }
+
+  
+  
+  //-----------------------------------------------------------------------------------------------------------------------------------
+  //   G E O M E T R Y
+  //-----------------------------------------------------------------------------------------------------------------------------------
+
+  /** */
+  def generatePersonalActivityGeo(outdir: Path, frame: Int, 
+                                  personal: TreeSet[PersonalActivity], 
+                                  averages: TreeMap[Long, Array[AverageActivity]]) 
+  {
+    val path = outdir + ("personalActivity.%04d.geo".format(frame))
+    println("Writing: " + path)
+	val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      val tpi = scala.math.Pi * 2.0
+      val tm = tpi / 180.0
+      val total = personal.map(_.total).reduce(_ + _).toDouble
+      
+      var pts = List[Pos3d]()
+      var idxs = List[(Index3i,Int)]()
+      
+      var pc = 0      
+      def arc(ta: Double, tb: Double, r0: Double, r1: Double, style: Int) {
+        val c = scala.math.ceil((tb - ta) / tm).toInt max 1
+        for(i <- 0 to c) {
+          val fr = Frame2d.rotate(Scalar.lerp(ta, tb, i.toDouble / c.toDouble)) 
+          pts = (fr xform Pos2d(r0, 0.0)).toPos3d :: (fr xform Pos2d(r1, 0.0)).toPos3d :: pts
+        }
+        for(i <- 0 until c) {
+          idxs = (Index3i(pc+1, pc+3, pc+2), style) :: (Index3i(pc, pc+1, pc+2), style) :: idxs
+          pc = pc + 2
+        }
+        pc = pc + 2
+      }
+      
+      val r0 = 1.0
+      val r1 = 1.01
+      val r2 = 1.015
+
+      val ogap = 0.0 //tpi / 2000.0
+      val igap = 0.0
+      
+      val scale = 50.0
+      
+      var off = 0L
+      for(pa <- personal) {
+    	val act = averages(pa.pid)(frame)
+    	val s = (act.sent.toDouble / pa.sent.toDouble) * scale
+    	val r = (act.recv.toDouble / pa.recv.toDouble) * scale
+    	
+        val List(t0, t1, t2) = List(off, off+pa.sent, off+pa.total).map(_.toDouble * tpi).map(_ / total)
+          
+        arc(t0+ogap, t2-ogap, r0, r1, 1)     // Inner
+        arc(t0+ogap, t1-igap, r2, r2+s, 2)   // Send
+        arc(t1+igap, t2-ogap, r2, r2+r, 3)   // Recv
+        
+        off = off + pa.total
+      }
+      
+      val style = "style"
+      val geo = GeoWriter(pts.size, idxs.size, primAttrs = List(PrimitiveIntAttr(style, 0)))
+      geo.writeHeader(out)
+      
+      for(p <- pts.reverseIterator) geo.writePoint(out, p) 
+
+      geo.writePrimAttrs(out)
+      geo.writePolygon(out, idxs.size)
+      for((i, s) <- idxs.reverseIterator) {
+    	geo.setPrimAttr(style, s)
+        geo.writeTriangle(out, i) 
+      }
+      
+      geo.writeFooter(out)
+    }
+    finally {
+      out.close
+    }
   }
 
 }
