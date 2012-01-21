@@ -182,13 +182,6 @@ object PeopleBucketer {
             out.close
           }
 
-          print("  Activity per Month: ")
-          for ((ms, cnt) <- perMonth) {
-            cal.setTimeInMillis(ms)
-            print((cal.get(Calendar.MONTH) + 1) + "/" + cal.get(Calendar.YEAR) + "=" + cnt + " ")
-          }
-          println
-
           (perMonth.firstKey, perMonth.lastKey)
         }
 
@@ -254,6 +247,13 @@ object PeopleBucketer {
               out.close
             }
           }
+          
+          
+          
+          
+          
+          
+          
           
           bk
         }
