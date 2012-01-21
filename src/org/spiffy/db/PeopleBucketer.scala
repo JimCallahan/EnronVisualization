@@ -326,7 +326,8 @@ object PeopleBucketer {
         println
         println("Generating Personal Activity Geometry...")
 
-        generatePersonalActivityGeo(Path("./artwork/houdini/geo"), 100, personal, avgActivity)
+        for(frame <- 0 until 787)
+          generatePersonalActivityGeo(Path("./artwork/houdini/geo"), frame, personal, avgActivity)
 
         
         //---------------------------------------------------------------------------------------------------
@@ -494,11 +495,12 @@ object PeopleBucketer {
                                   personal: TreeSet[PersonalActivity], 
                                   averages: TreeMap[Long, Array[AverageActivity]]) 
   {
+    import scala.math.{ceil,log,Pi}
     val path = outdir + ("personalActivity.%04d.geo".format(frame))
     println("Writing: " + path)
 	val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
-      val tpi = scala.math.Pi * 2.0
+      val tpi = Pi * 2.0
       val tm = tpi / 180.0
       val total = personal.map(_.total).reduce(_ + _).toDouble
       
@@ -507,7 +509,7 @@ object PeopleBucketer {
       
       var pc = 0      
       def arc(ta: Double, tb: Double, r0: Double, r1: Double, style: Int) {
-        val c = scala.math.ceil((tb - ta) / tm).toInt max 1
+        val c = ceil((tb - ta) / tm).toInt max 1
         for(i <- 0 to c) {
           val fr = Frame2d.rotate(Scalar.lerp(ta, tb, i.toDouble / c.toDouble)) 
           pts = (fr xform Pos2d(r0, 0.0)).toPos3d :: (fr xform Pos2d(r1, 0.0)).toPos3d :: pts
@@ -526,13 +528,20 @@ object PeopleBucketer {
       val ogap = tpi / 2000.0
       val igap = tpi / 2000.0
       
-      val scale = 50.0
+      val scale = 15.0
+      val barlim = 0.08
       
       var off = 0L
       for(pa <- personal) {
     	val act = averages(pa.pid)(frame)
-    	val s = (act.sent.toDouble / pa.sent.toDouble) * scale
-    	val r = (act.recv.toDouble / pa.recv.toDouble) * scale
+    	val (s, sclamp) = {
+    	  val v = log((act.sent.toDouble / pa.sent.toDouble) + 1.0) * scale
+    	  if(v > barlim) (barlim, true) else (v, false)
+    	}
+    	val (r, rclamp) = {
+    	  val v = log((act.recv.toDouble / pa.recv.toDouble) + 1.0) * scale
+    	  if(v > barlim) (barlim, true) else (v, false)
+    	}
     	
         val List(ts,te) = List(off, off+pa.total).map(_.toDouble * tpi).map(_ / total)
         
@@ -541,14 +550,14 @@ object PeopleBucketer {
         val t1 = t0 + tr*Scalar.clamp((pa.sent.toDouble/pa.total.toDouble), 0.25, 0.7)
         val t2 = t1 + igap
         
-        arc(t0, t3, r0, r1, 1)     // Inner
-        arc(t0, t1, r2, r2+s, 2)   // Send
-        arc(t2, t3, r2, r2+r, 3)   // Recv
+        arc(t0, t3, r0, r1, 1)                       // Inner
+        arc(t0, t1, r2, r2+s, if(sclamp) 4 else 2)   // Send
+        arc(t2, t3, r2, r2+r, if(rclamp) 5 else 3)   // Recv
         
         off = off + pa.total
       }
       
-      val style = "style"
+      val style = "style"  // 1 = Inner, 2 = Send, 3 = Recv, 4 = Send Clamped, 5 = Recv Clamped
       val geo = GeoWriter(pts.size, idxs.size, primAttrs = List(PrimitiveIntAttr(style, 0)))
       geo.writeHeader(out)
       
