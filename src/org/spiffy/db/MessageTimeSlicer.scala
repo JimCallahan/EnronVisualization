@@ -1,8 +1,9 @@
 package org.spiffy.db
 
 import org.scalagfx.io.Path
-import org.scalagfx.math.{Pos2d, Pos3d, Index3i, Frame2d}
+import org.scalagfx.math.{Pos2d, Pos3d, Index3i, Frame2d, Scalar}
 import org.scalagfx.houdini.geo.GeoWriter
+import org.scalagfx.houdini.geo.attr.{PrimitiveIntAttr}
 
 import collection.mutable.HashMap
 import collection.immutable.{ TreeMap, TreeSet }
@@ -164,6 +165,16 @@ object MessageTimeSlicer {
             print((cal.get(Calendar.MONTH) + 1) + "/" + cal.get(Calendar.YEAR) + "=" + cnt + " ")
           }
           // Debug
+          
+          // Debug
+          println
+          println
+          for ((ms, cnt) <- perMonth) {
+            println(ms + "\t" + cnt)
+          }
+          println
+          // Debug
+
 
           (perMonth.firstKey, perMonth.lastKey)
         }
@@ -399,30 +410,49 @@ object MessageTimeSlicer {
 	val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
       val tpi = scala.math.Pi * 2.0
-      val (r0, r1) = (0.9, 1.1)
+      val tm = tpi / 180.0
+      val (r0, r1) = (1.0, 1.02)
       val total = period.total.toDouble
       
       var pts = List[Pos3d]()
-      var idxs = List[Index3i]()
-      var pc = 0
+      var idxs = List[(Index3i,Boolean)]()
+      var pc = 0      
+      
+      def arc(ta: Double, tb: Double, sr: Boolean) {
+        val c = scala.math.ceil((tb - ta) / tm).toInt max 1
+        for(i <- 0 to c) {
+          val fr = Frame2d.rotate(Scalar.lerp(ta, tb, i.toDouble / c.toDouble)) 
+          pts = (fr xform Pos2d(r0, 0.0)).toPos3d :: (fr xform Pos2d(r1, 0.0)).toPos3d :: pts
+        }
+        for(i <- 0 until c) {
+          idxs = (Index3i(pc+1, pc+3, pc+2), sr) :: (Index3i(pc, pc+1, pc+2), sr) :: idxs
+          pc = pc + 2
+        }
+        pc = pc + 2
+      }
+      
       for(dom <- period.domains) {
         val doff = period.offset(dom.dname)
         for((pid, act) <- dom.activity) {
           val off = dom.offset(pid) + doff
-          val frames = List(off, off+act.sent, off+act.total).map(_.toDouble / total).map(t => Frame2d.rotate(t * tpi))
-          for(f <- frames) pts = (f xform Pos2d(r0, 0.0)).toPos3d :: (f xform Pos2d(r1, 0.0)).toPos3d :: pts
-          idxs = Index3i(pc+5, pc+4, pc+2) :: Index3i(pc+3, pc+5, pc+2) :: Index3i(pc+1, pc+3, pc+2) :: Index3i(pc+0, pc+1, pc+2) :: idxs
-          pc = pc + 6
+          val Array(t0, t1, t2) = Array(off, off+act.sent, off+act.total).map(o => (o.toDouble * tpi) / total)
+          arc(t0, t1, true)
+          arc(t1, t2, false)
         }
       }
       
-      val geo = GeoWriter(pts.size, idxs.size)
+      val sendrecv = "sendrecv"
+      val geo = GeoWriter(pts.size, idxs.size, primAttrs = List(PrimitiveIntAttr(sendrecv, 0)))
       geo.writeHeader(out)
       
-      for(p <- pts) geo.writePoint(out, p)
-      
+      for(p <- pts.reverseIterator) geo.writePoint(out, p) 
+
+      geo.writePrimAttrs(out)
       geo.writePolygon(out, idxs.size)
-      for(i <- idxs) geo.writeTriangle(out, i)
+      for((i, sr) <- idxs.reverseIterator) {
+    	if(sr) geo.setPrimAttr(sendrecv, 1)
+        geo.writeTriangle(out, i) 
+      }
       
       geo.writeFooter(out)
     }
