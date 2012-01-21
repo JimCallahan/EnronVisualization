@@ -420,7 +420,12 @@ object PeopleBucketer {
           case ("e-mail", "enron.com") =>
           case ("unknown", _) | (_, "unknown") =>
           case _ => {
-            val canon = name.toUpperCase.replace('.', ' ').replaceAll("  ", " ").trim
+            val canon = 
+              name.toUpperCase
+                .replace('.', ' ')
+                .replace(',', ' ')
+                .replaceAll("  ", " ")
+                .trim
             if (canon.size > 0) {
               val person =
                 if (nameToID.contains(canon)) Person(pid, nameToID(canon), canon)
@@ -515,11 +520,11 @@ object PeopleBucketer {
       }
       
       val r0 = 1.0
-      val r1 = 1.01
-      val r2 = 1.015
+      val r1 = 1.0075
+      val r2 = 1.0125
 
-      val ogap = 0.0 //tpi / 2000.0
-      val igap = 0.0
+      val ogap = tpi / 2000.0
+      val igap = tpi / 2000.0
       
       val scale = 50.0
       
@@ -529,11 +534,16 @@ object PeopleBucketer {
     	val s = (act.sent.toDouble / pa.sent.toDouble) * scale
     	val r = (act.recv.toDouble / pa.recv.toDouble) * scale
     	
-        val List(t0, t1, t2) = List(off, off+pa.sent, off+pa.total).map(_.toDouble * tpi).map(_ / total)
-          
-        arc(t0+ogap, t2-ogap, r0, r1, 1)     // Inner
-        arc(t0+ogap, t1-igap, r2, r2+s, 2)   // Send
-        arc(t1+igap, t2-ogap, r2, r2+r, 3)   // Recv
+        val List(ts,te) = List(off, off+pa.total).map(_.toDouble * tpi).map(_ / total)
+        
+        val (t0, t3) = (ts+ogap, te-ogap)
+        val tr = t3 - t0 - igap
+        val t1 = t0 + tr*Scalar.clamp((pa.sent.toDouble/pa.total.toDouble), 0.25, 0.7)
+        val t2 = t1 + igap
+        
+        arc(t0, t3, r0, r1, 1)     // Inner
+        arc(t0, t1, r2, r2+s, 2)   // Send
+        arc(t2, t3, r2, r2+r, 3)   // Recv
         
         off = off + pa.total
       }
