@@ -6,7 +6,7 @@ import org.scalagfx.houdini.geo.GeoWriter
 import org.scalagfx.houdini.geo.attr.{ PrimitiveIntAttr }
 
 import collection.mutable.HashMap
-import collection.immutable.{ TreeMap, TreeSet }
+import collection.immutable.{ Queue, TreeMap, TreeSet }
 
 import java.sql.{ Connection, DriverManager, ResultSet, SQLException, Timestamp }
 import java.util.{ Calendar, Date, GregorianCalendar }
@@ -23,31 +23,34 @@ object PeopleBucketer {
     /** Internal storage for counters: stamp -> pid -> activity */
     private var table = new HashMap[Long, HashMap[Long, Activity]]
 
-    /** Increment the e-mail counter.
-      * @param stamp The time stamp of start of period (in UTC milliseconds).
-      * @param sendID The unique identifier of the person who sent the e-mail (people.personid).
-      * @param recvID The unique identifier of the person who received the e-mail (people.personid). */
+    /**
+     * Increment the e-mail counter.
+     * @param stamp The time stamp of start of period (in UTC milliseconds).
+     * @param sendID The unique identifier of the person who sent the e-mail (people.personid).
+     * @param recvID The unique identifier of the person who received the e-mail (people.personid).
+     */
     def inc(stamp: Long, sendID: Long, recvID: Long) {
       val m = table.getOrElseUpdate(stamp, new HashMap[Long, Activity])
       m += (sendID -> m.getOrElseUpdate(sendID, Activity()).incSend)
       m += (recvID -> m.getOrElseUpdate(sendID, Activity()).incRecv)
     }
 
-    /** The range of times stored.
-      * @return The first and last period time stamps (in UTC milliseconds). */
+    /**
+     * The range of times stored.
+     * @return The first and last period time stamps (in UTC milliseconds).
+     */
     def timeRange: (Long, Long) =
       ((Long.MaxValue, 0L) /: table.keys) {
         case ((first, last), stamp) => (first min stamp, last max stamp)
       }
 
     /** The time period sample time stamps. */
-    def sampledPeriods: TreeSet[Long] = 
+    def sampledPeriods: TreeSet[Long] =
       (new TreeSet[Long]) ++ table.keySet
-      
-    /**
-     * The total number of e-mails during the given period.
-     * @param stamp The time stamp of start of period (in UTC milliseconds).
-     */
+
+    /** The total number of e-mails during the given period.
+      * @param stamp The time stamp of start of period (in UTC milliseconds).
+      */
     def totalPeriodActivity(stamp: Long): Activity = {
       if (!table.contains(stamp)) Activity()
       else (Activity() /: table(stamp).values)(_ + _)
@@ -77,6 +80,20 @@ object PeopleBucketer {
         i = i + 1
       }
       rtn
+    }
+    
+    /** Get the average e-mail activity history of a given person for each time period. 
+      * @param samples The number of samples to average. */
+    def personalAverageActivity(pid: Long, samples: Int): Array[AverageActivity] = {
+      var q = Queue[Activity]()
+      for(act <- personalActivity(pid)) yield {
+        q = q.enqueue(act)
+        while(q.size > samples) {
+          val (_, nq) = q.dequeue
+          q = nq
+        }
+        AverageActivity(q.reduce(_ + _), samples)
+      }
     }
   }
 
@@ -131,6 +148,25 @@ object PeopleBucketer {
     def apply(pid: Long) = new PersonalActivity(pid, 0L, 0L)
     def apply(pid: Long, act: Activity) = new PersonalActivity(pid, act.sent, act.recv)
     def apply(pid: Long, sent: Long, recv: Long) = new PersonalActivity(pid, sent, recv)
+  }
+
+  /**
+   * An average of e-mail activity over an time interval.
+   * @constructor
+   * @param sent The average number of messages sent.
+   * @param recv The average number of message received.
+   */
+  class AverageActivity private (val sent: Double, val recv: Double) {
+    /** The average total number e-mails sent and received by the person. */
+    def total = sent + recv
+
+    override def toString = "Activity(sent=%.4f, recv=%.4f)".format(sent, recv)
+  }
+
+  object AverageActivity {
+    def apply() = new AverageActivity(0.0, 0.0)
+    def apply(act: Activity, samples: Long) = 
+      new AverageActivity(act.sent.toDouble/samples.toDouble, act.recv.toDouble/samples.toDouble)
   }
 
   /**
@@ -212,57 +248,152 @@ object PeopleBucketer {
         println("Collect Daily Activity...")
         val bucket = {
           val interval = 24 * 60 * 60 * 1000 // 24-hours
-          val bk = collectMail(conn, people, range, interval)
-          
-          val samples = bk.sampledPeriods
+          collectMail(conn, people, range, interval)
+        }
 
-          {
-            val path = Path("./data/stats/dailyActivity.csv")
-            println("  Writing: " + path)
-            val out = new BufferedWriter(new FileWriter(path.toFile))
-            try {
-              out.write("TIME STAMP,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,\n")
-              for (stamp <- samples) {
-                val act = bk.totalPeriodActivity(stamp)
-                out.write(stamp + "," + act.total + "," + act.sent + "," + act.recv + ",\n")
-              }
-            } finally {
-              out.close
+        {
+          val samples = bucket.sampledPeriods
+        
+          val path = Path("./data/stats/dailyActivity.csv")
+          println("  Writing: " + path)
+          val out = new BufferedWriter(new FileWriter(path.toFile))
+          try {
+            out.write("TIME STAMP,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,\n")
+            for (stamp <- samples) {
+              val act = bucket.totalPeriodActivity(stamp)
+              out.write(stamp + "," + act.total + "," + act.sent + "," + act.recv + ",\n")
             }
+          } finally {
+            out.close
           }
-          
-          println
-          println("Compute Personal Totals...")
-          val personal = bk.totalPersonalActivity
-          
-          {
-            val path = Path("./data/stats/personalActivity.csv")
-            println("  Writing: " + path)
-            val out = new BufferedWriter(new FileWriter(path.toFile))
-            try {
-              out.write("PERSON ID,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,NAME,\n")
-              for (pa <- personal) 
-                out.write(pa.pid + "," + pa.total + "," + pa.sent + "," + pa.recv + "," + people(pa.pid).name + ",\n")
-            } finally {
-              out.close
+        }
+
+        //---------------------------------------------------------------------------------------------------
+
+        println
+        println("Compute Personal Totals...")
+        val personal = bucket.totalPersonalActivity
+
+        {
+          val path = Path("./data/stats/personalActivity.csv")
+          println("  Writing: " + path)
+          val out = new BufferedWriter(new FileWriter(path.toFile))
+          try {
+            out.write("PERSON ID,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,NAME,\n")
+            for (pa <- personal)
+              out.write(pa.pid + "," + pa.total + "," + pa.sent + "," + pa.recv + "," + people(pa.pid).name + ",\n")
+          } finally {
+            out.close
+          }
+        }
+
+        //---------------------------------------------------------------------------------------------------
+
+        println
+        println("Extract Activity of Most Active People...")
+        
+        {
+          var ma = new TreeMap[Long, Array[Activity]]
+
+          var c = 0
+          for (pa <- personal.take(300)) {
+            if(c%10 == 0)
+              ma = ma + (pa.pid -> bucket.personalActivity(pa.pid))
+            c = c + 1
+          }
+
+          val path = Path("./data/stats/mostActivePeople.csv")
+          println("  Writing: " + path)
+          val out = new BufferedWriter(new FileWriter(path.toFile))
+          try {
+            val (_, first) = ma.first
+            for(i <- 0 until first.size) {
+              for (ary <- ma.values) 
+                out.write(ary(i).total + ",")
+              out.write("\n")
             }
+          } finally {
+            out.close
+          } 
+        }
+
+        //---------------------------------------------------------------------------------------------------
+
+        println
+        println("Extract Activity of Most Active People...")
+        
+        {
+          val mostActivePeople = 300
+          val selectEvery = 10
+          
+          var ma = new TreeMap[Long, Array[Activity]]
+
+          var c = 0
+          for (pa <- personal.take(mostActivePeople)) {
+            if(c%selectEvery == 0)
+              ma = ma + (pa.pid -> bucket.personalActivity(pa.pid))
+            c = c + 1
           }
-          
-          
-          
-          
-          
-          
-          
-          
-          bk
+
+          val path = Path("./data/stats/mostActivePeople.csv")
+          println("  Writing: " + path)
+          val out = new BufferedWriter(new FileWriter(path.toFile))
+          try {
+            val (_, first) = ma.first
+            for(i <- 0 until first.size) {
+              for (ary <- ma.values) 
+                out.write(ary(i).total + ",")
+              out.write("\n")
+            }
+          } finally {
+            out.close
+          } 
+        }
+
+        //---------------------------------------------------------------------------------------------------
+
+        println
+        println("Extract Average Activity of Most Active People...")
+        
+        {
+          val mostActivePeople = 300
+          val selectEvery = 10
+          val samples = 30
+
+          var ma = new TreeMap[Long, Array[AverageActivity]]
+
+          var c = 0
+          for (pa <- personal.take(mostActivePeople)) {
+            if(c%selectEvery == 0)
+              ma = ma + (pa.pid -> bucket.personalAverageActivity(pa.pid, samples))
+            c = c + 1
+          }
+
+          val path = Path("./data/stats/mostActiveAveragePeople.csv")
+          println("  Writing: " + path)
+          val out = new BufferedWriter(new FileWriter(path.toFile))
+          try {
+            val (_, first) = ma.first
+            for(i <- 0 until first.size) {
+              for (ary <- ma.values) 
+                out.write("%.8f,".format(ary(i).total))
+              out.write("\n")
+            }
+          } finally {
+            out.close
+          } 
         }
 
         
         
+        
+        
+        
+        //---------------------------------------------------------------------------------------------------
+        
         println
         println("ALL DONE!")
-        
+
       } finally {
         conn.close
       }
@@ -377,13 +508,13 @@ object PeopleBucketer {
    * @param interval The number of milliseconds in each time period.
    */
   def collectMail(conn: Connection, people: TreeMap[Long, Person], range: (Long, Long), interval: Long): MailBucket = {
-    val (first, last) = range    
+    val (first, last) = range
     val bucket = new MailBucket
     val cal = new GregorianCalendar
 
     val st = conn.createStatement
     val rs = st.executeQuery("SELECT messagedt, senderid, personid FROM recipients, messages " +
-                             "WHERE recipients.messageid = messages.messageid")
+      "WHERE recipients.messageid = messages.messageid")
     while (rs.next) {
       try {
         val ts = rs.getTimestamp(1)
