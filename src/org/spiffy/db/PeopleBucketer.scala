@@ -528,8 +528,8 @@ object PeopleBucketer {
       val ogap = tpi / 2000.0
       val igap = tpi / 2000.0
       
-      val scale = 15.0
-      val barlim = 0.08
+      val scale = 10.0
+      val barlim = 0.035
       
       var off = 0L
       for(pa <- personal) {
