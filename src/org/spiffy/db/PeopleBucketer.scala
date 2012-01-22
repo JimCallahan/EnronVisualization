@@ -240,9 +240,9 @@ object PeopleBucketer {
           println("  Writing: " + path)
           val out = new BufferedWriter(new FileWriter(path.toFile))
           try {
-            out.write("TIME STAMP,TOTAL E-MAILS,\n")
+            out.write("TIME STAMP,TOTAL E-MAILS\n")
             for ((stamp, cnt) <- perMonth)
-              out.write(stamp + "," + cnt + ",\n")
+              out.write(stamp + "," + cnt + "\n")
           } finally {
             out.close
           }
@@ -261,9 +261,9 @@ object PeopleBucketer {
           println("  Writing: " + path)
           val out = new BufferedWriter(new FileWriter(path.toFile))
           try {
-            out.write("PERSON ID,UNIFIED ID,NAME,\n")
+            out.write("PERSON ID,UNIFIED ID,NAME\n")
             for ((_, p) <- ps)
-              out.write(p.pid + "," + p.unified + "," + p.name + ",\n")
+              out.write(p.pid + "," + p.unified + "," + p.name + "\n")
           } finally {
             out.close
           }
@@ -283,9 +283,9 @@ object PeopleBucketer {
             println("  Writing: " + path)
             val out = new BufferedWriter(new FileWriter(path.toFile))
             try {
-              out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS,\n")
+              out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
               for (t <- tt)
-                out.write(t.sendID + "," + t.recvID + "," + t.count + ",\n")
+                out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
             } finally {
               out.close
             }
@@ -296,9 +296,9 @@ object PeopleBucketer {
             println("  Writing: " + path)
             val out = new BufferedWriter(new FileWriter(path.toFile))
             try {
-              out.write("PERSON-A ID,PERSON-B ID,TOTAL BIDIRECTIONAL E-MAILS,\n")
+              out.write("PERSON-A ID,PERSON-B ID,TOTAL BIDIRECTIONAL E-MAILS\n")
               for (t <- bi)
-                out.write(t.sendID + "," + t.recvID + "," + t.count + ",\n")
+                out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
             } finally {
               out.close
             }
@@ -324,10 +324,10 @@ object PeopleBucketer {
           println("  Writing: " + path)
           val out = new BufferedWriter(new FileWriter(path.toFile))
           try {
-            out.write("TIME STAMP,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,\n")
+            out.write("TIME STAMP,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS\n")
             for (stamp <- samples) {
               val act = bucket.totalPeriodActivity(stamp)
-              out.write(stamp + "," + act.total + "," + act.sent + "," + act.recv + ",\n")
+              out.write(stamp + "," + act.total + "," + act.sent + "," + act.recv + "\n")
             }
           } finally {
             out.close
@@ -348,9 +348,9 @@ object PeopleBucketer {
           println("  Writing: " + path)
           val out = new BufferedWriter(new FileWriter(path.toFile))
           try {
-            out.write("PERSON ID,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,NAME,\n")
+            out.write("PERSON ID,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,NAME\n")
             for (pa <- tpa)
-              out.write(pa.pid + "," + pa.total + "," + pa.sent + "," + pa.recv + "," + people(pa.pid).name + ",\n")
+              out.write(pa.pid + "," + pa.total + "," + pa.sent + "," + pa.recv + "," + people(pa.pid).name + "\n")
           } finally {
             out.close
           }
@@ -374,9 +374,9 @@ object PeopleBucketer {
           println("  Writing: " + path)
           val out = new BufferedWriter(new FileWriter(path.toFile))
           try {
-            out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS,\n")
+            out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
             for (t <- tt)
-              out.write(t.sendID + "," + t.recvID + "," + t.count + ",\n")
+              out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
           } finally {
             out.close
           }
