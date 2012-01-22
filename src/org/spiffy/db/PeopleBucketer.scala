@@ -326,9 +326,18 @@ object PeopleBucketer {
         println
         println("Generating Personal Activity Geometry...")
 
-        for(frame <- 0 until 787)
-          generatePersonalActivityGeo(Path("./artwork/houdini/geo"), frame, personal, avgActivity)
+        if(true) {
+          for(frame <- 0 until 787)
+           generatePersonalActivityGeo(Path("./artwork/houdini/geo"), frame, personal, avgActivity)
+        }
+        
+        //---------------------------------------------------------------------------------------------------
 
+        println
+        println("Generating Personal Label HScript...")
+
+        generatePersonalLabelHScript(Path("./artwork/houdini/hscript"), "PeopleLabels", personal, people)
+        
         
         //---------------------------------------------------------------------------------------------------
         
@@ -483,26 +492,30 @@ object PeopleBucketer {
 
     bucket
   }
-
   
   
   //-----------------------------------------------------------------------------------------------------------------------------------
   //   G E O M E T R Y
   //-----------------------------------------------------------------------------------------------------------------------------------
 
-  /** */
-  def generatePersonalActivityGeo(outdir: Path, frame: Int, 
+  /** Generate circular bar graphs in Houdini GEO format for the send/recv activity of each person. 
+    * @param outdir Path to the directory where the GEO files are written.
+    * @param frame The number of the frame to generate.
+    * @param personal The total activity of the people to graph sorted by most to least active.
+    * @param averages The average activity history (all frames) for each person. */
+  def generatePersonalActivityGeo(outdir: Path, 
+                                  frame: Int, 
                                   personal: TreeSet[PersonalActivity], 
                                   averages: TreeMap[Long, Array[AverageActivity]]) 
   {
     import scala.math.{ceil,log,Pi}
     val path = outdir + ("personalActivity.%04d.geo".format(frame))
-    println("Writing: " + path)
+    println("  Writing: " + path)
 	val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
       val tpi = Pi * 2.0
       val tm = tpi / 180.0
-      val total = personal.map(_.total).reduce(_ + _).toDouble
+      val total = personal.toList.map(_.total).reduce(_ + _).toDouble
       
       var pts = List[Pos3d]()
       var idxs = List[(Index3i,Int)]()
@@ -576,5 +589,56 @@ object PeopleBucketer {
       out.close
     }
   }
+  
+  /** Generate circular bar graphs in Houdini GEO format for the send/recv activity of each person. 
+    * @param outdir Path to the directory where the GEO files are written.
+    * @param sopName The name of the Geometry SOP to create to hold the labels.
+    * @param personal The total activity of the people to graph sorted by most to least active.
+    * @param people The names of people indexed by unique personal identifier. */
+  def generatePersonalLabelHScript(outdir: Path, 
+                                   sopName: String, 
+                                   personal: TreeSet[PersonalActivity], 
+                                   people: TreeMap[Long, Person])
+  {
+    import scala.math.{ceil,log,Pi}
+    val path = outdir + "personalLabels.hscript"
+    println("  Writing: " + path)
+	val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      val total = personal.toList.map(_.total).reduce(_ + _).toDouble
+      val r = 1.07      
+      
+      out.write("opcf /obj\n" + 
+                "opadd -n geo " + sopName + "\n" +
+                "\n" + 
+                "opcf /obj/" + sopName + "\n" + 
+                "opadd -n merge AllLabels\n" + 
+                "opset -d on -r on AllLabels\n") 
+
+      var off = 0L
+      var cnt = 1
+      for(pa <- personal) {
+        val tm = ((off.toDouble + (pa.total.toDouble * 0.5)) * 360.0) / total
+        
+        val font = "font" + cnt
+        val xform = "xform" + cnt
+        out.write("opadd -n font " + font + "\n" + 
+                  "opparm " + font + " text ( '" + people(pa.pid).name + "' ) fontsize ( 0.03 ) hcenter ( off ) lod ( 1 )\n" + 
+                  "opadd -n xform " + xform + "\n" +  
+                  "opparm " + xform + " xOrd ( trs ) t ( %.6f 0 0 ) r ( 0 0 %.6f )\n".format(r, tm) +  
+                  "opwire -n " + font + " -0 " + xform + "\n" + 
+                  "opwire -n " + xform + " -" + cnt + " AllLabels\n")          
+        
+        off = off + pa.total
+        cnt = cnt + 1
+      }
+    }
+    finally {
+      out.close
+    }
+  }
+  
+          
+
 
 }
