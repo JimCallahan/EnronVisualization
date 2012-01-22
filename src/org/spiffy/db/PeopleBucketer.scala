@@ -6,11 +6,11 @@ import org.scalagfx.houdini.geo.GeoWriter
 import org.scalagfx.houdini.geo.attr.{ PrimitiveIntAttr }
 
 import collection.mutable.HashMap
-import collection.immutable.{ Queue, TreeMap, TreeSet }
+import collection.immutable.{ Queue, SortedSet, TreeMap, TreeSet }
 
 import java.sql.{ Connection, DriverManager, ResultSet, SQLException, Timestamp }
 import java.util.{ Calendar, Date, GregorianCalendar }
-import java.io.{ BufferedWriter, FileWriter }
+import java.io.{ BufferedWriter, BufferedReader, FileWriter, FileReader }
 
 object PeopleBucketer {
 
@@ -103,9 +103,13 @@ object PeopleBucketer {
       }
     }
   }
-      
+
   //---------------------------------------------------------------------------------------------------------
-  
+
+  trait PersonalIdentified {
+    val pid: Long
+  }
+
   /**
    * A person.
    * @constructor
@@ -114,7 +118,8 @@ object PeopleBucketer {
    * but points to the primary ID if there are duplicates.
    * @param name Canonicalized personal name: real name or e-mail prefix derived.
    */
-  class Person private (val pid: Long, val unified: Long, val name: String) {
+  class Person private (val pid: Long, val unified: Long, val name: String)
+    extends PersonalIdentified {
     override def toString = "Person(pid=" + pid + ", unified=" + unified + ", name=\"" + name + "\")"
   }
 
@@ -159,6 +164,7 @@ object PeopleBucketer {
    */
   class PersonalActivity private (val pid: Long, sent: Long, recv: Long)
     extends Activity(sent, recv)
+    with PersonalIdentified
     with Ordered[PersonalActivity] {
     /** Ordered in descending total number of e-mails and ascending IDs. */
     def compare(that: PersonalActivity): Int =
@@ -174,6 +180,32 @@ object PeopleBucketer {
     def apply(pid: Long) = new PersonalActivity(pid, 0L, 0L)
     def apply(pid: Long, act: Activity) = new PersonalActivity(pid, act.sent, act.recv)
     def apply(pid: Long, sent: Long, recv: Long) = new PersonalActivity(pid, sent, recv)
+  }
+
+  /**
+   * The Eigenvector Centrality of a persons e-mail activity.
+   * @constructor
+   * @param pid The unique identifier (people.personid).
+   * @param score The Eigenvector score computed for the person.
+   */
+  class PersonalCentrality private (val pid: Long, val score: Double)
+    extends PersonalIdentified
+    with Ordered[PersonalCentrality] {
+    /** Ordered in descending score and ascending IDs. */
+    def compare(that: PersonalCentrality): Int =
+      (that.score compare score) match {
+        case 0 => pid compare that.pid
+        case c => c
+      }
+
+    def normScore = scala.math.log(100.0 * score)
+    
+    override def toString = "PersonalCentrality(pid=%d, score=%.6f)".format(pid, score)
+  }
+
+  object PersonalCentrality {
+    def apply(pid: Long) = new PersonalCentrality(pid, 0.0)
+    def apply(pid: Long, score: Double) = new PersonalCentrality(pid, score)
   }
 
   /**
@@ -215,8 +247,7 @@ object PeopleBucketer {
     def apply(sendID: Long, recvID: Long) = new Traffic(sendID, recvID, 0L)
     def apply(sendID: Long, recvID: Long, count: Long) = new Traffic(sendID, recvID, count)
   }
-  
-  
+
   //---------------------------------------------------------------------------------------------------------
   //   M A I N    
   //---------------------------------------------------------------------------------------------------------
@@ -272,43 +303,6 @@ object PeopleBucketer {
         }
 
         //---------------------------------------------------------------------------------------------------
-        
-        println
-        println("Collect Directional Traffic Counts...")
-        val (trafficTotals, biTrafficTotals) = {
-          val rtn @ (tt, bi) = collectTrafficTotals(conn, people, range)
-          
-          {
-            val path = Path("./data/stats/trafficTotals.csv")
-            println("  Writing: " + path)
-            val out = new BufferedWriter(new FileWriter(path.toFile))
-            try {
-              out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
-              for (t <- tt)
-                out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
-            } finally {
-              out.close
-            }
-          }
-
-          {
-            val path = Path("./data/stats/biTrafficTotals.csv")
-            println("  Writing: " + path)
-            val out = new BufferedWriter(new FileWriter(path.toFile))
-            try {
-              out.write("PERSON-A ID,PERSON-B ID,TOTAL BIDIRECTIONAL E-MAILS\n")
-              for (t <- bi)
-                out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
-            } finally {
-              out.close
-            }
-          }
-
-          rtn
-        }
-        
-        
-        //---------------------------------------------------------------------------------------------------
 
         println
         println("Collect Daily Activity...")
@@ -336,90 +330,197 @@ object PeopleBucketer {
 
         //---------------------------------------------------------------------------------------------------
 
+        val numPeople = 100
+
+        println
+        println("Extract Most Central (" + numPeople + ") People...")
+
+        val mostCentral = {
+          var central = new TreeSet[PersonalCentrality]
+
+          val path = Path("./data/stats/pidsRanked.csv")
+          val in = new BufferedReader(new FileReader(path.toFile))
+          try {
+            var done = false
+            while (!done) {
+              val line = in.readLine
+              if (line == null) {
+                done = true
+              } else {
+                try {
+                  line.split(",") match {
+                    case Array(_, p, s, _) =>
+                      central = central + PersonalCentrality(p.filter(_ != '"').toLong, s.toDouble)
+                    case _ =>
+                  }
+                } catch {
+                  case _ =>
+                }
+              }
+            }
+          } finally {
+            in.close
+          }
+
+          central.take(numPeople)
+        }
+
+        //---------------------------------------------------------------------------------------------------
+
         println
         println("Compute Personal Totals...")
 
-        val numPeople = 100
-
-        val personal = {
-          val tpa = bucket.totalPersonalActivity
+        val (mostActivePersonal, mostCentralPersonal) = {
+          val totalPersonal = bucket.totalPersonalActivity
 
           val path = Path("./data/stats/personalActivity.csv")
           println("  Writing: " + path)
           val out = new BufferedWriter(new FileWriter(path.toFile))
           try {
             out.write("PERSON ID,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,NAME\n")
-            for (pa <- tpa)
+            for (pa <- totalPersonal)
               out.write(pa.pid + "," + pa.total + "," + pa.sent + "," + pa.recv + "," + people(pa.pid).name + "\n")
           } finally {
             out.close
           }
 
-          tpa.take(numPeople)
-        }
-  
-        //---------------------------------------------------------------------------------------------------
-        
-        println
-        println("Extract Directional Traffic of Most Active People...")
-        
-        {
-          var validID = TreeSet[Long]() 
-          for(pa <- personal)
-            validID = validID + pa.pid
-          
-          val tt = trafficTotals.filter(t => validID.contains(t.sendID) && validID.contains(t.recvID))
-          
-          val path = Path("./data/stats/mostActiveTrafficTotals.csv")
-          println("  Writing: " + path)
-          val out = new BufferedWriter(new FileWriter(path.toFile))
-          try {
-            out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
-            for (t <- tt)
-              out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
-          } finally {
-            out.close
-          }
+          println
+          println("Extract Most Active/Central (" + numPeople + ") Personal Totals...")
+
+          val centralIDs = mostCentral.map(_.pid)
+
+          (totalPersonal.take(numPeople),
+            totalPersonal.filter(pa => centralIDs.contains(pa.pid)))
         }
 
         //---------------------------------------------------------------------------------------------------
+
+        println
+        println("Collect Directional Traffic Counts...")
+        val biTrafficTotals = {
+          val (tt, bi) = collectTrafficTotals(conn, people, range)
+
+          {
+            val path = Path("./data/stats/trafficTotals.csv")
+            println("  Writing: " + path)
+            val out = new BufferedWriter(new FileWriter(path.toFile))
+            try {
+              out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
+              for (t <- tt)
+                out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
+            } finally {
+              out.close
+            }
+          }
+
+          {
+            val path = Path("./data/stats/biTrafficTotals.csv")
+            println("  Writing: " + path)
+            val out = new BufferedWriter(new FileWriter(path.toFile))
+            try {
+              out.write("PERSON-A ID,PERSON-B ID,TOTAL BIDIRECTIONAL E-MAILS\n")
+              for (t <- bi)
+                out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
+            } finally {
+              out.close
+            }
+          }
+
+          def extractTrafficTotals(prefix: String, selected: Traversable[PersonalIdentified]) {
+            var validID = TreeSet[Long]()
+            for (pi <- selected)
+              validID = validID + pi.pid
+
+            val tt = bi.filter(t => validID.contains(t.sendID) && validID.contains(t.recvID))
+
+            val path = Path("./data/stats/" + prefix + ".csv")
+            println("  Writing: " + path)
+            val out = new BufferedWriter(new FileWriter(path.toFile))
+            try {
+              out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
+              for (t <- tt)
+                out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
+            } finally {
+              out.close
+            }
+          }
+
+          println
+          println("Extract Directional Traffic of Most Active People...")
+
+          extractTrafficTotals("mostActiveTrafficTotals", mostActivePersonal)
+
+          println
+          println("Extract Directional Traffic of Most Central People...")
+
+          extractTrafficTotals("mostCentralTrafficTotals", mostCentralPersonal)
+
+          bi
+        }
+
+        //---------------------------------------------------------------------------------------------------
+
+        def extractAverageActivity(
+          prefix: String,
+          samples: Int,
+          personalActivities: Traversable[PersonalIdentified]): TreeMap[Long, Array[AverageActivity]] =
+          {
+            var aa = new TreeMap[Long, Array[AverageActivity]]
+
+            for (pa <- personalActivities)
+              aa = aa + (pa.pid -> bucket.personalAverageActivity(pa.pid, samples))
+
+            val path = Path("./data/stats/" + prefix + ".csv")
+            println("  Writing: " + path)
+            val out = new BufferedWriter(new FileWriter(path.toFile))
+            try {
+              val (_, first) = aa.first
+              for (i <- 0 until first.size) {
+                for (ary <- aa.values)
+                  out.write("%.8f,".format(ary(i).total))
+                out.write("\n")
+              }
+            } finally {
+              out.close
+            }
+
+            aa
+          }
 
         println
         println("Extract Average Activity of Most Active People...")
 
-        val avgActivity = {
-          val samples = 30
+        val mostActiveAvgAct = extractAverageActivity("mostActiveAveragePeople", 30, mostActivePersonal)
 
-          var aa = new TreeMap[Long, Array[AverageActivity]]
+        println
+        println("Extract Average Activity of Most Central People...")
 
-          for (pa <- personal)
-            aa = aa + (pa.pid -> bucket.personalAverageActivity(pa.pid, samples))
+        val mostCentralAvgAct = extractAverageActivity("mostCentralAveragePeople", 30, mostCentralPersonal)
 
-          val path = Path("./data/stats/mostActiveAveragePeople.csv")
-          println("  Writing: " + path)
-          val out = new BufferedWriter(new FileWriter(path.toFile))
-          try {
-            val (_, first) = aa.first
-            for (i <- 0 until first.size) {
-              for (ary <- aa.values)
-                out.write("%.8f,".format(ary(i).total))
-              out.write("\n")
-            }
-          } finally {
-            out.close
+        //---------------------------------------------------------------------------------------------------
+
+        if (false) {
+          println
+          println("Generating Most Active Personal Activity Geometry...")
+
+          for (frame <- 0 until 787) {
+            generatePersonalActivityGeo(
+              Path("./artwork/houdini/geo"), "mostActivePersonalActivity", frame,
+              mostActivePersonal, mostActiveAvgAct)
           }
-
-          aa
         }
 
         //---------------------------------------------------------------------------------------------------
 
-        println
-        println("Generating Personal Activity Geometry...")
-
         if (true) {
-          for (frame <- 0 until 787)
-            generatePersonalActivityGeo(Path("./artwork/houdini/geo"), frame, personal, avgActivity)
+          println
+          println("Generating Most Central Personal Activity Geometry...")
+
+          for (frame <- 0 until 787) {
+            generatePersonalActivityGeo(
+              Path("./artwork/houdini/geo"), "mostCentralPersonalActivity", frame,
+              mostCentral, mostCentralPersonal, mostCentralAvgAct)
+          }
         }
 
         //---------------------------------------------------------------------------------------------------
@@ -427,7 +528,11 @@ object PeopleBucketer {
         println
         println("Generating Personal Label HScript...")
 
-        generatePersonalLabelHScript(Path("./artwork/houdini/hscript"), "PeopleLabels", personal, people)
+        generatePersonalActivityLabelHScript(
+          Path("./artwork/houdini/hscript"), "mostActiveLabels", "PeopleLabels", mostActivePersonal, people)
+
+        generatePersonalCentralityLabelHScript(
+          Path("./artwork/houdini/hscript"), "mostCentralLabels", "PeopleLabels", mostCentral, people)
 
         //---------------------------------------------------------------------------------------------------
 
@@ -483,7 +588,6 @@ object PeopleBucketer {
       .filter(_ match { case (_, cnt) => cnt > threshold })
   }
 
-  
   /**
    * Lookup the names of all the users, discarding those without valid names.
    * @param conn The SQL connection.
@@ -549,7 +653,7 @@ object PeopleBucketer {
   /**
    * Collect counts of directional e-mail traffic between individual pairs of people.
    * E-Mails from or to people not included in the directory will be silently ignored.
-   * Bi-directional exchanges (returned as the second list) is the minimum of the Traffic.count for 
+   * Bi-directional exchanges (returned as the second list) is the minimum of the Traffic.count for
    * e-mails exchanged from person A to B and person B to A.  The results list will contain pairs
    * of symmetric Traffic entries with identical counts between any two people included.
    * @param conn The SQL connection.
@@ -557,14 +661,14 @@ object PeopleBucketer {
    * @param range The (start, end) time stamps of the time period under consideration.
    * @return The one-way traffic totals between all people and the bi-directional exchange traffic totals.
    */
-  def collectTrafficTotals(conn: Connection, people: TreeMap[Long,Person], range: (Long, Long)): (List[Traffic], List[Traffic]) = {
+  def collectTrafficTotals(conn: Connection, people: TreeMap[Long, Person], range: (Long, Long)): (List[Traffic], List[Traffic]) = {
     val (first, last) = range
-    val table = new HashMap[Long,HashMap[Long,Long]]
+    val table = new HashMap[Long, HashMap[Long, Long]]
     val cal = new GregorianCalendar
 
     val st = conn.createStatement
     val rs = st.executeQuery("SELECT messagedt, senderid, personid FROM recipients, messages " +
-                             "WHERE recipients.messageid = messages.messageid")
+      "WHERE recipients.messageid = messages.messageid")
     while (rs.next) {
       try {
         val ts = rs.getTimestamp(1)
@@ -575,39 +679,39 @@ object PeopleBucketer {
         val ms = cal.getTimeInMillis
 
         if ((first <= ms) && (ms <= last) && people.contains(sid)) {
-          val sendID = people(sid).unified          
-          val receivers = table.getOrElseUpdate(sendID, new HashMap[Long,Long])
+          val sendID = people(sid).unified
+          val receivers = table.getOrElseUpdate(sendID, new HashMap[Long, Long])
           receivers += (rid -> (receivers.getOrElse(rid, 0L) + 1L))
         }
       } catch {
         case _: SQLException => // Ignore invalid people.
       }
     }
-    
+
     val biTable = {
-      val bidir = new HashMap[Long,HashMap[Long,Long]]
-      for((sid, rm) <- table; (rid, srCount) <- rm) {
-        if(table.contains(rid)) {
+      val bidir = new HashMap[Long, HashMap[Long, Long]]
+      for ((sid, rm) <- table; (rid, srCount) <- rm) {
+        if (table.contains(rid)) {
           val sm = table(rid)
-          if(sm.contains(sid)) {
-            val rsCount = sm(sid)	  
-            bidir.getOrElseUpdate(sid, new HashMap[Long,Long]) += (rid -> (srCount min rsCount))
+          if (sm.contains(sid)) {
+            val rsCount = sm(sid)
+            bidir.getOrElseUpdate(sid, new HashMap[Long, Long]) += (rid -> (srCount min rsCount))
           }
         }
-      } 
+      }
       bidir
     }
-    
-    def results(hm: HashMap[Long,HashMap[Long,Long]]) = {
+
+    def results(hm: HashMap[Long, HashMap[Long, Long]]) = {
       var rtn: List[Traffic] = List()
-      for((sid, rm) <- hm; (rid, cnt) <- rm) 
-         rtn = Traffic(sid, rid, cnt) :: rtn
+      for ((sid, rm) <- hm; (rid, cnt) <- rm)
+        rtn = Traffic(sid, rid, cnt) :: rtn
       rtn
     }
-    
-    (results(table), results(biTable)) 
+
+    (results(table), results(biTable))
   }
-  
+
   /**
    * Collects e-mail activity for each user over fixed intervals of time.
    * @param conn The SQL connection.
@@ -622,7 +726,7 @@ object PeopleBucketer {
 
     val st = conn.createStatement
     val rs = st.executeQuery("SELECT messagedt, senderid, personid FROM recipients, messages " +
-                             "WHERE recipients.messageid = messages.messageid")
+      "WHERE recipients.messageid = messages.messageid")
     while (rs.next) {
       try {
         val ts = rs.getTimestamp(1)
@@ -653,16 +757,20 @@ object PeopleBucketer {
   /**
    * Generate circular bar graphs in Houdini GEO format for the send/recv activity of each person.
    * @param outdir Path to the directory where the GEO files are written.
+   * @param prefix The GEO filename prefix.
    * @param frame The number of the frame to generate.
    * @param personal The total activity of the people to graph sorted by most to least active.
    * @param averages The average activity history (all frames) for each person.
    */
-  def generatePersonalActivityGeo(outdir: Path,
+  def generatePersonalActivityGeo(
+    outdir: Path,
+    prefix: String,
     frame: Int,
     personal: TreeSet[PersonalActivity],
     averages: TreeMap[Long, Array[AverageActivity]]) {
+
     import scala.math.{ ceil, log, Pi }
-    val path = outdir + ("personalActivity.%04d.geo".format(frame))
+    val path = outdir + (prefix + ".%04d.geo".format(frame))
     println("  Writing: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
@@ -745,16 +853,123 @@ object PeopleBucketer {
   /**
    * Generate circular bar graphs in Houdini GEO format for the send/recv activity of each person.
    * @param outdir Path to the directory where the GEO files are written.
+   * @param prefix The GEO filename prefix.
+   * @param frame The number of the frame to generate.
+   * @param centrality The eigenvector centrality of the people to graph sorted by score.
+   * @param personal The total activity of the most central people to graph sorted by most to least active.
+   * @param averages The average activity history (all frames) for each person.
+   */
+  def generatePersonalActivityGeo(
+    outdir: Path,
+    prefix: String,
+    frame: Int,
+    centrality: TreeSet[PersonalCentrality],
+    personal: TreeSet[PersonalActivity],
+    averages: TreeMap[Long, Array[AverageActivity]]) {
+
+    import scala.math.{ ceil, log, Pi }
+    val path = outdir + (prefix + ".%04d.geo".format(frame))
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      val tpi = Pi * 2.0
+      val tm = tpi / 180.0
+      val total = centrality.toList.map(_.normScore).reduce(_ + _)
+
+      var pts = List[Pos3d]()
+      var idxs = List[(Index3i, Int)]()
+
+      var pc = 0
+      def arc(ta: Double, tb: Double, r0: Double, r1: Double, style: Int) {
+        val c = ceil((tb - ta) / tm).toInt max 1
+        for (i <- 0 to c) {
+          val fr = Frame2d.rotate(Scalar.lerp(ta, tb, i.toDouble / c.toDouble))
+          pts = (fr xform Pos2d(r0, 0.0)).toPos3d :: (fr xform Pos2d(r1, 0.0)).toPos3d :: pts
+        }
+        for (i <- 0 until c) {
+          idxs = (Index3i(pc + 1, pc + 3, pc + 2), style) :: (Index3i(pc, pc + 1, pc + 2), style) :: idxs
+          pc = pc + 2
+        }
+        pc = pc + 2
+      }
+
+      val r0 = 1.0
+      val r1 = 1.0075
+      val r2 = 1.0125
+
+      val ogap = tpi / 2000.0
+      val igap = ogap * 0.5
+
+      val scale = 10.0
+      val barlim = 0.035
+
+      val paTable =
+        ((new TreeMap[Long, PersonalActivity]) /: personal) {
+          case (rtn, pa) => rtn + (pa.pid -> pa)
+        }
+
+      var off = 0.0
+      for (cent <- centrality) {
+        val xpa = paTable(cent.pid)
+
+        val act = averages(cent.pid)(frame)
+        val (s, sclamp) = {
+          val v = log((act.sent.toDouble / xpa.sent.toDouble) + 1.0) * scale
+          if (v > barlim) (barlim, true) else (v, false)
+        }
+        val (r, rclamp) = {
+          val v = log((act.recv.toDouble / xpa.recv.toDouble) + 1.0) * scale
+          if (v > barlim) (barlim, true) else (v, false)
+        }
+
+        val List(ts, te) = List(off, off + cent.normScore).map(_ * (tpi / total))
+
+        val (t0, t3) = (ts + ogap, te - ogap)
+        val tr = t3 - t0 - igap
+        val tm = Scalar.lerp(t0, t3, 0.5)
+        val t1 = tm - igap
+        val t2 = tm + igap
+
+        arc(t0, t3, r0, r1, 1) // Inner
+        arc(t0, t1, r2, r2 + s, if (sclamp) 4 else 2) // Send
+        arc(t2, t3, r2, r2 + r, if (rclamp) 5 else 3) // Recv
+
+        off = off + cent.normScore
+      }
+
+      val style = "style" // 1 = Inner, 2 = Send, 3 = Recv, 4 = Send Clamped, 5 = Recv Clamped
+      val geo = GeoWriter(pts.size, idxs.size, primAttrs = List(PrimitiveIntAttr(style, 0)))
+      geo.writeHeader(out)
+
+      for (p <- pts.reverseIterator) geo.writePoint(out, p)
+
+      geo.writePrimAttrs(out)
+      geo.writePolygon(out, idxs.size)
+      for ((i, s) <- idxs.reverseIterator) {
+        geo.setPrimAttr(style, s)
+        geo.writeTriangle(out, i)
+      }
+
+      geo.writeFooter(out)
+    } finally {
+      out.close
+    }
+  }
+
+  /**
+   * Generate a label in Houdini HScript format for each person around the circular graph.
+   * @param outdir Path to the directory where the GEO files are written.
    * @param sopName The name of the Geometry SOP to create to hold the labels.
    * @param personal The total activity of the people to graph sorted by most to least active.
    * @param people The names of people indexed by unique personal identifier.
    */
-  def generatePersonalLabelHScript(outdir: Path,
+  def generatePersonalActivityLabelHScript(outdir: Path,
+    prefix: String,
     sopName: String,
     personal: TreeSet[PersonalActivity],
     people: TreeMap[Long, Person]) {
     import scala.math.{ ceil, log, Pi }
-    val path = outdir + "personalLabels.hscript"
+    val path = outdir + (prefix + ".hscript")
     println("  Writing: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
@@ -783,6 +998,57 @@ object PeopleBucketer {
           "opwire -n " + xform + " -" + cnt + " AllLabels\n")
 
         off = off + pa.total
+        cnt = cnt + 1
+      }
+    } finally {
+      out.close
+    }
+  }
+
+  /**
+   * Generate a label in Houdini HScript format for each person around the circular graph.
+   * @param outdir Path to the directory where the GEO files are written.
+   * @param sopName The name of the Geometry SOP to create to hold the labels.
+   * @param centrality The eigenvector centrality of the people to graph sorted by score.
+   * @param people The names of people indexed by unique personal identifier.
+   */
+  def generatePersonalCentralityLabelHScript(
+      outdir: Path,
+    prefix: String,
+    sopName: String,
+    centrality: TreeSet[PersonalCentrality],
+    people: TreeMap[Long, Person]) 
+  {
+    import scala.math.{ ceil, log, Pi }
+    val path = outdir + (prefix + ".hscript")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      val total = centrality.toList.map(_.normScore).reduce(_ + _)
+      val r = 1.07
+
+      out.write("opcf /obj\n" +
+        "opadd -n geo " + sopName + "\n" +
+        "\n" +
+        "opcf /obj/" + sopName + "\n" +
+        "opadd -n merge AllLabels\n" +
+        "opset -d on -r on AllLabels\n")
+
+      var off = 0.0
+      var cnt = 1
+      for (pc <- centrality) {
+        val tm = ((off.toDouble + pc.normScore * 0.5) * 360.0) / total
+
+        val font = "font" + cnt
+        val xform = "xform" + cnt
+        out.write("opadd -n font " + font + "\n" +
+          "opparm " + font + " text ( '" + people(pc.pid).name + "' ) fontsize ( 0.03 ) hcenter ( off ) lod ( 1 )\n" +
+          "opadd -n xform " + xform + "\n" +
+          "opparm " + xform + " xOrd ( trs ) t ( %.6f 0 0 ) r ( 0 0 %.6f )\n".format(r, tm) +
+          "opwire -n " + font + " -0 " + xform + "\n" +
+          "opwire -n " + xform + " -" + cnt + " AllLabels\n")
+
+        off = off + pc.normScore
         cnt = cnt + 1
       }
     } finally {
