@@ -27,130 +27,49 @@ object EnronVizApp {
         // Number of people to display in the graph.
         val numPeople = 100
 
-        //---------------------------------------------------------------------------------------------------
-
-        println("Determining the Active Interval...")
-        val range @ (firstMonth, lastMonth) = {
-          val threshold = 10000
-          val mt = activeMonths(conn, threshold)
-          writeMonthlyTotals(mt)
-          (mt.firstKey, mt.lastKey)
-        }
-
-        //---------------------------------------------------------------------------------------------------
-
-        println
-        println("Collecting People...")
-        val people = collectPeople(conn)
-        writePeople(people)
-
-        //---------------------------------------------------------------------------------------------------
-
-        println
-        println("Extract Most Central (" + numPeople + ") People...")
-        val mostCentral = readMostCentral(numPeople)
-
-        //---------------------------------------------------------------------------------------------------
-
-        println
-        println("Collect Daily Activity...")
-        val bucket = {
-          val interval = 24 * 60 * 60 * 1000 // 24-hours
-          collectMail(conn, people, range, interval)
-        }
-        writeDailyActivity(bucket)
-
-        //---------------------------------------------------------------------------------------------------
-
-        println
-        println("Compute Personal Totals...")
-        val (mostActivePersonal, mostCentralPersonal) = {
-          val totalPersonal = bucket.totalPersonalActivity
-          writePersonalActivity(totalPersonal, people)
-
-          println
-          println("Extract Most Active/Central (" + numPeople + ") Personal Totals...")
-          val centralIDs = mostCentral.map(_.pid)
-          (totalPersonal.take(numPeople), totalPersonal.filter(pa => centralIDs.contains(pa.pid)))
-        }
-
-        //---------------------------------------------------------------------------------------------------
-
-        println
-        println("Collect Directional Traffic Counts...")
-        val biTrafficTotals = {
-          val (tt, bi) = collectTrafficTotals(conn, people, range)
-          writeTrafficTotals(tt)
-          writeBiTrafficTotals(bi, mostActivePersonal, mostCentralPersonal)
-          bi
-        }
-
-        //---------------------------------------------------------------------------------------------------
-
-        println
-        println("Extract Average Activity of Most Active/Central People...")
-        val (mostActiveAvgAct, mostCentralAvgAct) = {
-          val samples = 30
-          def extract(selected: TreeSet[PersonalActivity]): TreeMap[Long, Array[AverageActivity]] = {
-            var aa = new TreeMap[Long, Array[AverageActivity]]
-            for (pa <- selected)
-              aa = aa + (pa.pid -> bucket.personalAverageActivity(pa.pid, samples))
-            aa
-          }
-
-          (extract(mostActivePersonal), extract(mostCentralPersonal))
-        }
-        writeAverageActivity("mostActiveAveragePeople", mostActiveAvgAct)
-        writeAverageActivity("mostCentralAveragePeople", mostCentralAvgAct)
-
-        //---------------------------------------------------------------------------------------------------
-
+        // Number of frames of animation to generate.
         val numFrames = 787
 
-        // DUMMY FOR NOW
-        val averageTraffic = {
-          val rtn = new Array[TreeSet[AverageTraffic]](numFrames)
+        // Whether to generate geometry for the most active people.
+        val genActive = true
 
-          var validID = TreeSet[Long]()
-          for (pi <- mostCentralPersonal)
-            validID = validID + pi.pid
+        // Whether to generate geometry for the most central (eigenvector centrality) people.
+        val genCentral = true
 
-          val avgtr = biTrafficTotals.filter(t => validID.contains(t.sendID) && validID.contains(t.recvID))
-          for (i <- 0 until numFrames)
-            rtn(i) = TreeSet[AverageTraffic]() ++ (avgtr.filter(_ => scala.math.random < 0.01).map(AverageTraffic(_, 1)))
+        // The directory to write Houdini GEO format files.
+        val geodir = Path("./artwork/houdini/geo")
 
-          rtn
-        }
+        // The directory to write Houdini HScript format files.
+        val hsdir = Path("./artwork/houdini/hscript")
 
         //---------------------------------------------------------------------------------------------------
 
-        if (false) {
-          println
-          println("Generating Most Active Personal Activity Geometry...")
-
-          for (frame <- 0 until numFrames) {
-            generatePersonalActivityGeo(
-              Path("./artwork/houdini/geo"), "mostActivePersonalActivity", frame,
-              mostActivePersonal, mostActiveAvgAct)
-          }
-        }
+        // Generate the average activity ring geometry and labels for the most central people.
+        val (range @ (firstMonth, lastMonth), mostCentral) =
+          generateActivityRing(conn, numPeople, numFrames, genActive, genCentral, geodir, hsdir)
 
         //---------------------------------------------------------------------------------------------------
 
-        if (true) {
-          println
-          println("Generating Most Central Personal Activity Geometry...")
+        // Generate link curves for the average traffic between the most central people. 
+        val averageTraffic = new Array[TreeSet[AverageTraffic]](numFrames)
 
-          for (frame <- 0 until numFrames) {
-            generatePersonalActivityGeo(
-              Path("./artwork/houdini/geo"), "mostCentralPersonalActivity", frame,
-              mostCentral, mostCentralPersonal, mostCentralAvgAct)
-          }
-        }
+        /*
+    {
+      val rtn = new Array[TreeSet[AverageTraffic]](numFrames)
 
-        //---------------------------------------------------------------------------------------------------
+      var validID = TreeSet[Long]()
+      for (pi <- mostCentralPersonal)
+        validID = validID + pi.pid
 
-        if (true) {
+      val avgtr = biTrafficTotals.filter(t => validID.contains(t.sendID) && validID.contains(t.recvID))
+      for (i <- 0 until numFrames)
+        rtn(i) = TreeSet[AverageTraffic]() ++ (avgtr.filter(_ => scala.math.random < 0.01).map(AverageTraffic(_, 1)))
+
+      rtn
+    }
+    
+
+        if (genCentral) {
           println
           println("Generating Traffic Link Geometry...")
 
@@ -160,17 +79,7 @@ object EnronVizApp {
               mostCentral, averageTraffic)
           }
         }
-
-        //---------------------------------------------------------------------------------------------------
-
-        println
-        println("Generating Personal Label HScript...")
-
-        generatePersonalActivityLabelHScript(
-          Path("./artwork/houdini/hscript"), "mostActiveLabels", "PeopleLabels", mostActivePersonal, people)
-
-        generatePersonalCentralityLabelHScript(
-          Path("./artwork/houdini/hscript"), "mostCentralLabels", "PeopleLabels", mostCentral, people)
+*/
 
         //---------------------------------------------------------------------------------------------------
 
@@ -185,6 +94,123 @@ object EnronVizApp {
         println("Uncaught Exception: " + ex.getMessage + "\n" +
           "Stack Trace:\n" + ex.getStackTraceString)
     }
+  }
+
+  /** Generate the average activity ring geometry and labels for the most central people.
+    * @param conn The SQL connection.
+    * @param numPeople Number of people to display in the graph.
+    * @param numFrames Number of frames of animation to generate.
+    * @param genActive Whether to generate geometry for the most active people.
+    * @param genCentral Whether to generate geometry for the most central (eigenvector centrality) people.
+    * @return The active time range (start, end) in milliseconds UTC and the set of most central people.
+    */
+  def generateActivityRing(
+    conn: Connection,
+    numPeople: Int,
+    numFrames: Int,
+    genActive: Boolean,
+    genCentral: Boolean,
+    geodir: Path,
+    hsdir: Path): ((Long, Long), TreeSet[PersonalCentrality]) = {
+
+    println("Determining the Active Interval...")
+    val range @ (firstMonth, lastMonth) = {
+      val threshold = 10000
+      val mt = activeMonths(conn, threshold)
+      writeMonthlyTotals(mt)
+      (mt.firstKey, mt.lastKey)
+    }
+
+    println
+    println("Collecting People...")
+    val people = collectPeople(conn)
+    writePeople(people)
+
+    println
+    println("Extract Most Central (" + numPeople + ") People...")
+    val mostCentral = readMostCentral(numPeople)
+
+    println
+    println("Collect Daily Activity...")
+    val bucket = {
+      val interval = 24 * 60 * 60 * 1000 // 24-hours
+      collectMail(conn, people, range, interval)
+    }
+    writeDailyActivity(bucket)
+
+    println
+    println("Compute Personal Totals...")
+    val (mostActivePersonal, mostCentralPersonal) = {
+      val totalPersonal = bucket.totalPersonalActivity
+      writePersonalActivity(totalPersonal, people)
+
+      println
+      println("Extract Most Active/Central (" + numPeople + ") Personal Totals...")
+      val centralIDs = mostCentral.map(_.pid)
+      (totalPersonal.take(numPeople), totalPersonal.filter(pa => centralIDs.contains(pa.pid)))
+    }
+
+    println
+    println("Collect Directional Traffic Counts...")
+    val biTrafficTotals = {
+      val (tt, bi) = collectTrafficTotals(conn, people, range)
+      writeTrafficTotals(tt)
+      writeBiTrafficTotals(bi, mostActivePersonal, mostCentralPersonal)
+      bi
+    }
+
+    println
+    println("Extract Average Activity of Most Active/Central People...")
+    val (mostActiveAvgAct, mostCentralAvgAct) = {
+      val samples = 30
+      def extract(selected: TreeSet[PersonalActivity]): TreeMap[Long, Array[AverageActivity]] = {
+        var aa = new TreeMap[Long, Array[AverageActivity]]
+        for (pa <- selected)
+          aa = aa + (pa.pid -> bucket.personalAverageActivity(pa.pid, samples))
+        aa
+      }
+
+      (extract(mostActivePersonal), extract(mostCentralPersonal))
+    }
+    writeAverageActivity("mostActiveAveragePeople", mostActiveAvgAct)
+    writeAverageActivity("mostCentralAveragePeople", mostCentralAvgAct)
+
+    if (genActive) {
+      println
+      println("Generating Most Active Personal Label HScript...")
+      generatePersonalActivityLabelHScript(
+        Path("./artwork/houdini/hscript"), "mostActiveLabels", "PeopleLabels", mostActivePersonal, people)
+
+      println
+      println("Generating Most Active Personal Activity Geometry...")
+      val prefix = "mostActivePersonalActivity"
+      println("  GEO Files: " + (geodir + prefix) + ".%04d-%04d.geo".format(0, numFrames))
+      print("  Writing: ")
+      for (frame <- 0 until numFrames) {
+        generatePersonalActivityGeo(geodir, prefix, frame, mostActivePersonal, mostActiveAvgAct)
+        if(frame%100 == 99) print(" [" + (frame+1) + "]\n           ") else print(".")
+      }
+      println(" [" + numFrames + "] -- DONE!")
+    }
+
+    if (genCentral) {
+      println
+      println("Generating Most Central Personal Label HScript...")
+      generatePersonalCentralityLabelHScript(hsdir, "mostCentralLabels", "PeopleLabels", mostCentral, people)
+
+      println
+      println("Generating Most Central Personal Activity Geometry...")
+      val prefix = "mostCentralPersonalActivity"
+      println("  GEO Files: " + (geodir + prefix) + ".%04d-%04d.geo".format(0, numFrames))
+      print("  Writing: ")
+      for (frame <- 0 until numFrames) {
+        generatePersonalActivityGeo(geodir, prefix, frame, mostCentral, mostCentralPersonal, mostCentralAvgAct)
+        if(frame%100 == 99) print(" [" + (frame+1) + "]\n           ") else print(".")
+      }
+      println(" [" + numFrames + "] -- DONE.")
+    }
+
+    (range, mostCentral)
   }
 
   //-----------------------------------------------------------------------------------------------------------------------------------
@@ -393,7 +419,7 @@ object EnronVizApp {
   //   C S V   O U T P U T 
   //-----------------------------------------------------------------------------------------------------------------------------------
 
-  /** */
+  /** Write the total e-mails sent each month. */
   def writeMonthlyTotals(perMonth: TreeMap[Long, Long]) {
     val path = Path("./data/stats/monthlyTotals.csv")
     println("  Writing: " + path)
@@ -407,7 +433,7 @@ object EnronVizApp {
     }
   }
 
-  /** */
+  /** Write the list of validated people. */
   def writePeople(ps: TreeMap[Long, Person]) {
     val path = Path("./data/stats/people.csv")
     println("  Writing: " + path)
@@ -421,7 +447,7 @@ object EnronVizApp {
     }
   }
 
-  /** */
+  /** Read the most central (eigenvector centrality) people computed externally with R. */
   def readMostCentral(numPeople: Int): TreeSet[PersonalCentrality] = {
     var central = new TreeSet[PersonalCentrality]
 
@@ -452,7 +478,7 @@ object EnronVizApp {
     central.take(numPeople)
   }
 
-  /** */
+  /** Write the daily total e-mail activity counts. */
   def writeDailyActivity(bucket: MailBucket) {
     val samples = bucket.sampledPeriods
 
@@ -470,7 +496,7 @@ object EnronVizApp {
     }
   }
 
-  /** */
+  /** Write the total activity for each person. */
   def writePersonalActivity(totalPersonal: TreeSet[PersonalActivity], people: TreeMap[Long, Person]) {
     val path = Path("./data/stats/personalActivity.csv")
     println("  Writing: " + path)
@@ -484,7 +510,7 @@ object EnronVizApp {
     }
   }
 
-  /** */
+  /** Write the total number of e-mails sent from one person to another. */ 
   def writeTrafficTotals(totals: List[Traffic]) {
     val path = Path("./data/stats/trafficTotals.csv")
     println("  Writing: " + path)
@@ -498,7 +524,7 @@ object EnronVizApp {
     }
   }
 
-  /** */
+  /** Write the total number of bidirectional e-mail exchanges between pairs of people (minimum of A->B and B->A traffic) */
   def writeBiTrafficTotals(totals: List[Traffic],
                            mostActive: TreeSet[PersonalActivity],
                            mostCentral: TreeSet[PersonalActivity]) {
@@ -541,7 +567,7 @@ object EnronVizApp {
     writeSelected("mostCentralTrafficTotals", mostCentral)
   }
 
-  /** */
+  /** Write the average amount of e-mail activity each day for each person. */
   def writeAverageActivity(prefix: String, avgActivities: TreeMap[Long, Array[AverageActivity]]) = {
     val path = Path("./data/stats/" + prefix + ".csv")
     println("  Writing: " + path)
@@ -577,7 +603,6 @@ object EnronVizApp {
 
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".%04d.geo".format(frame))
-    println("  Writing: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
       val tpi = Pi * 2.0
@@ -673,7 +698,6 @@ object EnronVizApp {
 
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".%04d.geo".format(frame))
-    println("  Writing: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
       val tpi = Pi * 2.0
