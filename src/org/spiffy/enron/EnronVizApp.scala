@@ -1,4 +1,4 @@
-package org.spiffy.db
+package org.spiffy.enron
 
 import org.scalagfx.io.Path
 import org.scalagfx.math.{ Pos2d, Pos3d, Index3i, Frame2d, Scalar }
@@ -12,245 +12,7 @@ import java.sql.{ Connection, DriverManager, ResultSet, SQLException, Timestamp 
 import java.util.{ Calendar, Date, GregorianCalendar }
 import java.io.{ BufferedWriter, BufferedReader, FileWriter, FileReader }
 
-object PeopleBucketer {
-
-  //---------------------------------------------------------------------------------------------------------
-  //   C L A S S E S 
-  //---------------------------------------------------------------------------------------------------------
-
-  /** A counter of e-mails sent and received by each person at each point in time. */
-  class MailBucket {
-    /** Internal storage for counters: stamp -> pid -> activity */
-    private var table = new HashMap[Long, HashMap[Long, Activity]]
-
-    /**
-     * Increment the e-mail counter.
-     * @param stamp The time stamp of start of period (in UTC milliseconds).
-     * @param sendID The unique identifier of the person who sent the e-mail (people.personid).
-     * @param recvID The unique identifier of the person who received the e-mail (people.personid).
-     */
-    def inc(stamp: Long, sendID: Long, recvID: Long) {
-      val m = table.getOrElseUpdate(stamp, new HashMap[Long, Activity])
-      m += (sendID -> m.getOrElseUpdate(sendID, Activity()).incSend)
-      m += (recvID -> m.getOrElseUpdate(sendID, Activity()).incRecv)
-    }
-
-    /**
-     * The range of times stored.
-     * @return The first and last period time stamps (in UTC milliseconds).
-     */
-    def timeRange: (Long, Long) =
-      ((Long.MaxValue, 0L) /: table.keys) {
-        case ((first, last), stamp) => (first min stamp, last max stamp)
-      }
-
-    /** The time period sample time stamps. */
-    def sampledPeriods: TreeSet[Long] =
-      (new TreeSet[Long]) ++ table.keySet
-
-    /**
-     * The total number of e-mails during the given period.
-     * @param stamp The time stamp of start of period (in UTC milliseconds).
-     */
-    def totalPeriodActivity(stamp: Long): Activity = {
-      if (!table.contains(stamp)) Activity()
-      else (Activity() /: table(stamp).values)(_ + _)
-    }
-
-    /** Get the total e-mail activity of each person sorted by most to least active. */
-    def totalPersonalActivity: TreeSet[PersonalActivity] = {
-      var totals = new HashMap[Long, Activity]
-      for (m <- table.values) {
-        for ((pid, act) <- m) {
-          totals += (pid -> (totals.getOrElseUpdate(pid, Activity()) + act))
-        }
-      }
-      ((new TreeSet[PersonalActivity]) /: totals) {
-        case (rtn, (pid, act)) => rtn + PersonalActivity(pid, act)
-      }
-    }
-
-    /**
-     * Get the e-mail activity history of a given person for each time period.
-     * @param pid The unique personal identifier (people.personid).
-     */
-    def personalActivity(pid: Long): Array[Activity] = {
-      val stamps = new TreeSet[Long] ++ table.keySet
-      val rtn = new Array[Activity](stamps.size)
-      var i = 0
-      for (stamp <- stamps) {
-        rtn(i) = if (!table.contains(stamp)) Activity()
-        else table(stamp).getOrElse(pid, Activity())
-        i = i + 1
-      }
-      rtn
-    }
-
-    /**
-     * Get the average e-mail activity history of a given person for each time period.
-     * @param pid The unique personal identifier (people.personid).
-     * @param samples The number of samples to average.
-     */
-    def personalAverageActivity(pid: Long, samples: Int): Array[AverageActivity] = {
-      var q = Queue[Activity]()
-      for (act <- personalActivity(pid)) yield {
-        q = q.enqueue(act)
-        while (q.size > samples) {
-          val (_, nq) = q.dequeue
-          q = nq
-        }
-        AverageActivity(q.reduce(_ + _), samples)
-      }
-    }
-  }
-
-  //---------------------------------------------------------------------------------------------------------
-
-  trait PersonalIdentified {
-    val pid: Long
-  }
-
-  /**
-   * A person.
-   * @constructor
-   * @param pid The personal identifier (people.personid).
-   * @param unified The unified personal identifier.  Same as (pid) if there is only one record for this person
-   * but points to the primary ID if there are duplicates.
-   * @param name Canonicalized personal name: real name or e-mail prefix derived.
-   */
-  class Person private (val pid: Long, val unified: Long, val name: String)
-    extends PersonalIdentified {
-    override def toString = "Person(pid=" + pid + ", unified=" + unified + ", name=\"" + name + "\")"
-  }
-
-  object Person {
-    def apply(pid: Long, name: String) = new Person(pid, pid, name)
-    def apply(pid: Long, unified: Long, name: String) = new Person(pid, unified, name)
-  }
-
-  /**
-   * Some e-mail activity.
-   * @constructor
-   * @param sent The number of messages sent.
-   * @param recv The number of message received.
-   */
-  class Activity protected (val sent: Long, val recv: Long) {
-    /** The total number e-mails sent and received by the person. */
-    def total = sent + recv
-
-    /** Accumulate message counts. */
-    def +(that: Activity) = Activity(sent + that.sent, recv + that.recv)
-
-    /** Increment to the sent count. */
-    def incSend = Activity(sent + 1, recv)
-
-    /** Increment to the received count. */
-    def incRecv = Activity(sent, recv + 1)
-
-    override def toString = "Activity(sent=" + sent + ", recv=" + recv + ")"
-  }
-
-  object Activity {
-    def apply() = new Activity(0L, 0L)
-    def apply(sent: Long, recv: Long) = new Activity(sent, recv)
-  }
-
-  /**
-   * The e-mail activity of a person.
-   * @constructor
-   * @param pid The unique identifier (people.personid).
-   * @param sent The number of messages sent.
-   * @param recv The number of message received.
-   */
-  class PersonalActivity private (val pid: Long, sent: Long, recv: Long)
-    extends Activity(sent, recv)
-    with PersonalIdentified
-    with Ordered[PersonalActivity] {
-    /** Ordered in descending total number of e-mails and ascending IDs. */
-    def compare(that: PersonalActivity): Int =
-      (that.total compare total) match {
-        case 0 => pid compare that.pid
-        case c => c
-      }
-
-    override def toString = "PersonalActivity(pid=" + pid + ", sent=" + sent + ", recv=" + recv + ")"
-  }
-
-  object PersonalActivity {
-    def apply(pid: Long) = new PersonalActivity(pid, 0L, 0L)
-    def apply(pid: Long, act: Activity) = new PersonalActivity(pid, act.sent, act.recv)
-    def apply(pid: Long, sent: Long, recv: Long) = new PersonalActivity(pid, sent, recv)
-  }
-
-  /**
-   * The Eigenvector Centrality of a persons e-mail activity.
-   * @constructor
-   * @param pid The unique identifier (people.personid).
-   * @param score The Eigenvector score computed for the person.
-   */
-  class PersonalCentrality private (val pid: Long, val score: Double)
-    extends PersonalIdentified
-    with Ordered[PersonalCentrality] {
-    /** Ordered in descending score and ascending IDs. */
-    def compare(that: PersonalCentrality): Int =
-      (that.score compare score) match {
-        case 0 => pid compare that.pid
-        case c => c
-      }
-
-    def normScore = scala.math.log(100.0 * score)
-    
-    override def toString = "PersonalCentrality(pid=%d, score=%.6f)".format(pid, score)
-  }
-
-  object PersonalCentrality {
-    def apply(pid: Long) = new PersonalCentrality(pid, 0.0)
-    def apply(pid: Long, score: Double) = new PersonalCentrality(pid, score)
-  }
-
-  /**
-   * An average of e-mail activity over an time interval.
-   * @constructor
-   * @param sent The average number of messages sent.
-   * @param recv The average number of message received.
-   */
-  class AverageActivity private (val sent: Double, val recv: Double) {
-    /** The average total number e-mails sent and received by the person. */
-    def total = sent + recv
-
-    override def toString = "Activity(sent=%.4f, recv=%.4f)".format(sent, recv)
-  }
-
-  object AverageActivity {
-    def apply() = new AverageActivity(0.0, 0.0)
-    def apply(act: Activity, samples: Long) =
-      new AverageActivity(act.sent.toDouble / samples.toDouble, act.recv.toDouble / samples.toDouble)
-  }
-
-  /**
-   * A counter of the amount of directional e-mail activity between two people.
-   * @constructor
-   * @param sendID The personal identifier of the sender.
-   * @param recvID The personal identifier of the receiver.
-   */
-  class Traffic private (val sendID: Long, val recvID: Long, val count: Long) {
-    /** Accumulate message counts. */
-    def +(that: Traffic) = Traffic(sendID, recvID, count + that.count)
-
-    /** Increment to the sent count. */
-    def inc = Traffic(sendID, recvID, count + 1)
-
-    override def toString = "Traffic(sendID=" + sendID + ", recvID=" + recvID + ", count=" + count + ")"
-  }
-
-  object Traffic {
-    def apply(sendID: Long, recvID: Long) = new Traffic(sendID, recvID, 0L)
-    def apply(sendID: Long, recvID: Long, count: Long) = new Traffic(sendID, recvID, count)
-  }
-
-  //---------------------------------------------------------------------------------------------------------
-  //   M A I N    
-  //---------------------------------------------------------------------------------------------------------
+object EnronVizApp {
 
   // Loads the JDBC driver. 
   classOf[com.mysql.jdbc.Driver]
@@ -553,12 +315,11 @@ object PeopleBucketer {
   //   D A T A B A S E 
   //-----------------------------------------------------------------------------------------------------------------------------------
 
-  /**
-   * Get the number of e-mails received per month (index in UTC milliseconds), ignoring those months with
-   * less activity than the given threshold number of emails.
-   * @param conn The SQL connection.
-   * @param threshold The minimum amount of e-mail activity.
-   */
+  /** Get the number of e-mails received per month (index in UTC milliseconds), ignoring those months with
+    * less activity than the given threshold number of emails.
+    * @param conn The SQL connection.
+    * @param threshold The minimum amount of e-mail activity.
+    */
   def activeMonths(conn: Connection, threshold: Long): TreeMap[Long, Long] = {
     val cal = new GregorianCalendar
     var perMonth = new HashMap[Long, Long]
@@ -588,10 +349,9 @@ object PeopleBucketer {
       .filter(_ match { case (_, cnt) => cnt > threshold })
   }
 
-  /**
-   * Lookup the names of all the users, discarding those without valid names.
-   * @param conn The SQL connection.
-   */
+  /** Lookup the names of all the users, discarding those without valid names.
+    * @param conn The SQL connection.
+    */
   def collectPeople(conn: Connection): TreeMap[Long, Person] = {
     var rtn = new TreeMap[Long, Person]
 
@@ -610,7 +370,7 @@ object PeopleBucketer {
           else {
             addr.filter(_ != '"').filter(_ != ''').split("@") match {
               case Array(p, d) => (p, d)
-              case _ => (addr, "unknown")
+              case _           => (addr, "unknown")
             }
           }
 
@@ -622,7 +382,7 @@ object PeopleBucketer {
 
         // Toss out bogus addresses.
         (name, domain) match {
-          case ("e-mail", "enron.com") =>
+          case ("e-mail", "enron.com")         =>
           case ("unknown", _) | (_, "unknown") =>
           case _ => {
             val canon =
@@ -650,18 +410,19 @@ object PeopleBucketer {
     rtn
   }
 
-  /**
-   * Collect counts of directional e-mail traffic between individual pairs of people.
-   * E-Mails from or to people not included in the directory will be silently ignored.
-   * Bi-directional exchanges (returned as the second list) is the minimum of the Traffic.count for
-   * e-mails exchanged from person A to B and person B to A.  The results list will contain pairs
-   * of symmetric Traffic entries with identical counts between any two people included.
-   * @param conn The SQL connection.
-   * @param people The person directory.
-   * @param range The (start, end) time stamps of the time period under consideration.
-   * @return The one-way traffic totals between all people and the bi-directional exchange traffic totals.
-   */
-  def collectTrafficTotals(conn: Connection, people: TreeMap[Long, Person], range: (Long, Long)): (List[Traffic], List[Traffic]) = {
+  /** Collect counts of directional e-mail traffic between individual pairs of people.
+    * E-Mails from or to people not included in the directory will be silently ignored.
+    * Bi-directional exchanges (returned as the second list) is the minimum of the Traffic.count for
+    * e-mails exchanged from person A to B and person B to A.  The results list will contain pairs
+    * of symmetric Traffic entries with identical counts between any two people included.
+    * @param conn The SQL connection.
+    * @param people The person directory.
+    * @param range The (start, end) time stamps of the time period under consideration.
+    * @return The one-way traffic totals between all people and the bi-directional exchange traffic totals.
+    */
+  def collectTrafficTotals(conn: Connection,
+                           people: TreeMap[Long, Person],
+                           range: (Long, Long)): (List[Traffic], List[Traffic]) = {
     val (first, last) = range
     val table = new HashMap[Long, HashMap[Long, Long]]
     val cal = new GregorianCalendar
@@ -712,14 +473,16 @@ object PeopleBucketer {
     (results(table), results(biTable))
   }
 
-  /**
-   * Collects e-mail activity for each user over fixed intervals of time.
-   * @param conn The SQL connection.
-   * @param people The person directory.
-   * @param range The (start, end) time stamps of the time period under consideration.
-   * @param interval The number of milliseconds in each time period.
-   */
-  def collectMail(conn: Connection, people: TreeMap[Long, Person], range: (Long, Long), interval: Long): MailBucket = {
+  /** Collects e-mail activity for each user over fixed intervals of time.
+    * @param conn The SQL connection.
+    * @param people The person directory.
+    * @param range The (start, end) time stamps of the time period under consideration.
+    * @param interval The number of milliseconds in each time period.
+    */
+  def collectMail(conn: Connection,
+                  people: TreeMap[Long, Person],
+                  range: (Long, Long),
+                  interval: Long): MailBucket = {
     val (first, last) = range
     val bucket = new MailBucket
     val cal = new GregorianCalendar
@@ -739,7 +502,7 @@ object PeopleBucketer {
         if ((first <= ms) && (ms <= last)) {
           (people.get(sid), people.get(rid)) match {
             case (Some(s), Some(r)) => bucket.inc(ms - ((ms - first) % interval), s.unified, r.unified)
-            case _ =>
+            case _                  =>
           }
         }
       } catch {
@@ -754,20 +517,18 @@ object PeopleBucketer {
   //   G E O M E T R Y
   //-----------------------------------------------------------------------------------------------------------------------------------
 
-  /**
-   * Generate circular bar graphs in Houdini GEO format for the send/recv activity of each person.
-   * @param outdir Path to the directory where the GEO files are written.
-   * @param prefix The GEO filename prefix.
-   * @param frame The number of the frame to generate.
-   * @param personal The total activity of the people to graph sorted by most to least active.
-   * @param averages The average activity history (all frames) for each person.
-   */
-  def generatePersonalActivityGeo(
-    outdir: Path,
-    prefix: String,
-    frame: Int,
-    personal: TreeSet[PersonalActivity],
-    averages: TreeMap[Long, Array[AverageActivity]]) {
+  /** Generate circular bar graphs in Houdini GEO format for the send/recv activity of each person.
+    * @param outdir Path to the directory where the GEO files are written.
+    * @param prefix The GEO filename prefix.
+    * @param frame The number of the frame to generate.
+    * @param personal The total activity of the people to graph sorted by most to least active.
+    * @param averages The average activity history (all frames) for each person.
+    */
+  def generatePersonalActivityGeo(outdir: Path,
+                                  prefix: String,
+                                  frame: Int,
+                                  personal: TreeSet[PersonalActivity],
+                                  averages: TreeMap[Long, Array[AverageActivity]]) {
 
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".%04d.geo".format(frame))
@@ -850,22 +611,20 @@ object PeopleBucketer {
     }
   }
 
-  /**
-   * Generate circular bar graphs in Houdini GEO format for the send/recv activity of each person.
-   * @param outdir Path to the directory where the GEO files are written.
-   * @param prefix The GEO filename prefix.
-   * @param frame The number of the frame to generate.
-   * @param centrality The eigenvector centrality of the people to graph sorted by score.
-   * @param personal The total activity of the most central people to graph sorted by most to least active.
-   * @param averages The average activity history (all frames) for each person.
-   */
-  def generatePersonalActivityGeo(
-    outdir: Path,
-    prefix: String,
-    frame: Int,
-    centrality: TreeSet[PersonalCentrality],
-    personal: TreeSet[PersonalActivity],
-    averages: TreeMap[Long, Array[AverageActivity]]) {
+  /** Generate circular bar graphs in Houdini GEO format for the send/recv activity of each person.
+    * @param outdir Path to the directory where the GEO files are written.
+    * @param prefix The GEO filename prefix.
+    * @param frame The number of the frame to generate.
+    * @param centrality The eigenvector centrality of the people to graph sorted by score.
+    * @param personal The total activity of the most central people to graph sorted by most to least active.
+    * @param averages The average activity history (all frames) for each person.
+    */
+  def generatePersonalActivityGeo(outdir: Path,
+                                  prefix: String,
+                                  frame: Int,
+                                  centrality: TreeSet[PersonalCentrality],
+                                  personal: TreeSet[PersonalActivity],
+                                  averages: TreeMap[Long, Array[AverageActivity]]) {
 
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".%04d.geo".format(frame))
@@ -956,18 +715,17 @@ object PeopleBucketer {
     }
   }
 
-  /**
-   * Generate a label in Houdini HScript format for each person around the circular graph.
-   * @param outdir Path to the directory where the GEO files are written.
-   * @param sopName The name of the Geometry SOP to create to hold the labels.
-   * @param personal The total activity of the people to graph sorted by most to least active.
-   * @param people The names of people indexed by unique personal identifier.
-   */
+  /** Generate a label in Houdini HScript format for each person around the circular graph.
+    * @param outdir Path to the directory where the HScript files are written.
+    * @param sopName The name of the Geometry SOP to create to hold the labels.
+    * @param personal The total activity of the people to graph sorted by most to least active.
+    * @param people The names of people indexed by unique personal identifier.
+    */
   def generatePersonalActivityLabelHScript(outdir: Path,
-    prefix: String,
-    sopName: String,
-    personal: TreeSet[PersonalActivity],
-    people: TreeMap[Long, Person]) {
+                                           prefix: String,
+                                           sopName: String,
+                                           personal: TreeSet[PersonalActivity],
+                                           people: TreeMap[Long, Person]) {
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".hscript")
     println("  Writing: " + path)
@@ -1005,20 +763,17 @@ object PeopleBucketer {
     }
   }
 
-  /**
-   * Generate a label in Houdini HScript format for each person around the circular graph.
-   * @param outdir Path to the directory where the GEO files are written.
-   * @param sopName The name of the Geometry SOP to create to hold the labels.
-   * @param centrality The eigenvector centrality of the people to graph sorted by score.
-   * @param people The names of people indexed by unique personal identifier.
-   */
-  def generatePersonalCentralityLabelHScript(
-      outdir: Path,
-    prefix: String,
-    sopName: String,
-    centrality: TreeSet[PersonalCentrality],
-    people: TreeMap[Long, Person]) 
-  {
+  /** Generate a label in Houdini HScript format for each person around the circular graph.
+    * @param outdir Path to the directory where the HScript files are written.
+    * @param sopName The name of the Geometry SOP to create to hold the labels.
+    * @param centrality The eigenvector centrality of the people to graph sorted by score.
+    * @param people The names of people indexed by unique personal identifier.
+    */
+  def generatePersonalCentralityLabelHScript(outdir: Path,
+                                             prefix: String,
+                                             sopName: String,
+                                             centrality: TreeSet[PersonalCentrality],
+                                             people: TreeMap[Long, Person]) {
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".hscript")
     println("  Writing: " + path)
@@ -1051,6 +806,27 @@ object PeopleBucketer {
         off = off + pc.normScore
         cnt = cnt + 1
       }
+    } finally {
+      out.close
+    }
+  }
+
+  /** Generate a label in Houdini HScript format
+    * @param outdir Path to the directory where the HScript files are written.
+    * @param sopName The name of the Geometry SOP to create to hold the labels.
+    * @param range The (start, end) time stamps of the time period under consideration.
+    * @param interval The number of milliseconds in each time period.
+    */
+  def generateDateLabelHScript(outdir: Path,
+                               prefix: String,
+                               sopName: String,
+                               range: (Long, Long),
+                               interval: Long) {
+    val path = outdir + (prefix + ".hscript")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+
     } finally {
       out.close
     }

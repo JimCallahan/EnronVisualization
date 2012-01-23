@@ -8,10 +8,11 @@
 			<arg value="/c" />
 			<arg value="scaladoc.bat" />
 		    <arg value="-classpath"/>
-		    <arg value="external/connector-j/mysql-connector-java-5.1.18-bin.jar"/>
+		    <arg value="external/connector-j/mysql-connector-java-5.1.18-bin.jar;../Graphics/target/ScalaGFX.jar"/>
 			<arg value="-d" />
 			<arg value="docs" />
 			<arg value="src/org/spiffy/db/*.scala" />
+			<arg value="src/org/spiffy/enron/*.scala" /> 
 		</exec>
 	</target>
 	<target name="MakeDocsJar" description="Create a jar for the Enron API documentation.">
