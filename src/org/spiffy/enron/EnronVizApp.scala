@@ -24,45 +24,31 @@ object EnronVizApp {
       val connStr = "jdbc:mysql://localhost:3306/enron?user=enron&password=slimyfucks"
       val conn = DriverManager.getConnection(connStr)
       try {
+        // Number of people to display in the graph.
+        val numPeople = 100
+
+        //---------------------------------------------------------------------------------------------------
+
         println("Determining the Active Interval...")
         val range @ (firstMonth, lastMonth) = {
           val threshold = 10000
-          val perMonth = activeMonths(conn, threshold)
-
-          val path = Path("./data/stats/monthlyTotals.csv")
-          println("  Writing: " + path)
-          val out = new BufferedWriter(new FileWriter(path.toFile))
-          try {
-            out.write("TIME STAMP,TOTAL E-MAILS\n")
-            for ((stamp, cnt) <- perMonth)
-              out.write(stamp + "," + cnt + "\n")
-          } finally {
-            out.close
-          }
-
-          (perMonth.firstKey, perMonth.lastKey)
+          val mt = activeMonths(conn, threshold)
+          writeMonthlyTotals(mt)
+          (mt.firstKey, mt.lastKey)
         }
 
         //---------------------------------------------------------------------------------------------------
 
         println
         println("Collecting People...")
-        val people = {
-          val ps = collectPeople(conn)
+        val people = collectPeople(conn)
+        writePeople(people)
 
-          val path = Path("./data/stats/people.csv")
-          println("  Writing: " + path)
-          val out = new BufferedWriter(new FileWriter(path.toFile))
-          try {
-            out.write("PERSON ID,UNIFIED ID,NAME\n")
-            for ((_, p) <- ps)
-              out.write(p.pid + "," + p.unified + "," + p.name + "\n")
-          } finally {
-            out.close
-          }
+        //---------------------------------------------------------------------------------------------------
 
-          ps
-        }
+        println
+        println("Extract Most Central (" + numPeople + ") People...")
+        val mostCentral = readMostCentral(numPeople)
 
         //---------------------------------------------------------------------------------------------------
 
@@ -72,87 +58,20 @@ object EnronVizApp {
           val interval = 24 * 60 * 60 * 1000 // 24-hours
           collectMail(conn, people, range, interval)
         }
-
-        {
-          val samples = bucket.sampledPeriods
-
-          val path = Path("./data/stats/dailyActivity.csv")
-          println("  Writing: " + path)
-          val out = new BufferedWriter(new FileWriter(path.toFile))
-          try {
-            out.write("TIME STAMP,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS\n")
-            for (stamp <- samples) {
-              val act = bucket.totalPeriodActivity(stamp)
-              out.write(stamp + "," + act.total + "," + act.sent + "," + act.recv + "\n")
-            }
-          } finally {
-            out.close
-          }
-        }
-
-        //---------------------------------------------------------------------------------------------------
-
-        val numPeople = 100
-
-        println
-        println("Extract Most Central (" + numPeople + ") People...")
-
-        val mostCentral = {
-          var central = new TreeSet[PersonalCentrality]
-
-          val path = Path("./data/stats/pidsRanked.csv")
-          val in = new BufferedReader(new FileReader(path.toFile))
-          try {
-            var done = false
-            while (!done) {
-              val line = in.readLine
-              if (line == null) {
-                done = true
-              } else {
-                try {
-                  line.split(",") match {
-                    case Array(_, p, s, _) =>
-                      central = central + PersonalCentrality(p.filter(_ != '"').toLong, s.toDouble)
-                    case _ =>
-                  }
-                } catch {
-                  case _ =>
-                }
-              }
-            }
-          } finally {
-            in.close
-          }
-
-          central.take(numPeople)
-        }
+        writeDailyActivity(bucket)
 
         //---------------------------------------------------------------------------------------------------
 
         println
         println("Compute Personal Totals...")
-
         val (mostActivePersonal, mostCentralPersonal) = {
           val totalPersonal = bucket.totalPersonalActivity
-
-          val path = Path("./data/stats/personalActivity.csv")
-          println("  Writing: " + path)
-          val out = new BufferedWriter(new FileWriter(path.toFile))
-          try {
-            out.write("PERSON ID,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,NAME\n")
-            for (pa <- totalPersonal)
-              out.write(pa.pid + "," + pa.total + "," + pa.sent + "," + pa.recv + "," + people(pa.pid).name + "\n")
-          } finally {
-            out.close
-          }
+          writePersonalActivity(totalPersonal, people)
 
           println
           println("Extract Most Active/Central (" + numPeople + ") Personal Totals...")
-
           val centralIDs = mostCentral.map(_.pid)
-
-          (totalPersonal.take(numPeople),
-            totalPersonal.filter(pa => centralIDs.contains(pa.pid)))
+          (totalPersonal.take(numPeople), totalPersonal.filter(pa => centralIDs.contains(pa.pid)))
         }
 
         //---------------------------------------------------------------------------------------------------
@@ -161,107 +80,33 @@ object EnronVizApp {
         println("Collect Directional Traffic Counts...")
         val biTrafficTotals = {
           val (tt, bi) = collectTrafficTotals(conn, people, range)
-
-          {
-            val path = Path("./data/stats/trafficTotals.csv")
-            println("  Writing: " + path)
-            val out = new BufferedWriter(new FileWriter(path.toFile))
-            try {
-              out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
-              for (t <- tt)
-                out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
-            } finally {
-              out.close
-            }
-          }
-
-          {
-            val path = Path("./data/stats/biTrafficTotals.csv")
-            println("  Writing: " + path)
-            val out = new BufferedWriter(new FileWriter(path.toFile))
-            try {
-              out.write("PERSON-A ID,PERSON-B ID,TOTAL BIDIRECTIONAL E-MAILS\n")
-              for (t <- bi)
-                out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
-            } finally {
-              out.close
-            }
-          }
-
-          def extractTrafficTotals(prefix: String, selected: Traversable[PersonalIdentified]) {
-            var validID = TreeSet[Long]()
-            for (pi <- selected)
-              validID = validID + pi.pid
-
-            val tt = bi.filter(t => validID.contains(t.sendID) && validID.contains(t.recvID))
-
-            val path = Path("./data/stats/" + prefix + ".csv")
-            println("  Writing: " + path)
-            val out = new BufferedWriter(new FileWriter(path.toFile))
-            try {
-              out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
-              for (t <- tt)
-                out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
-            } finally {
-              out.close
-            }
-          }
-
-          println
-          println("Extract Directional Traffic of Most Active People...")
-
-          extractTrafficTotals("mostActiveTrafficTotals", mostActivePersonal)
-
-          println
-          println("Extract Directional Traffic of Most Central People...")
-
-          extractTrafficTotals("mostCentralTrafficTotals", mostCentralPersonal)
-
+          writeTrafficTotals(tt)
+          writeBiTrafficTotals(bi, mostActivePersonal, mostCentralPersonal)
           bi
         }
 
         //---------------------------------------------------------------------------------------------------
 
-        def extractAverageActivity(prefix: String,
-                                   samples: Int,
-                                   personalActivities: Traversable[PersonalIdentified]): TreeMap[Long, Array[AverageActivity]] =
-          {
+        println
+        println("Extract Average Activity of Most Active/Central People...")
+        val (mostActiveAvgAct, mostCentralAvgAct) = {
+          val samples = 30
+          def extract(selected: TreeSet[PersonalActivity]): TreeMap[Long, Array[AverageActivity]] = {
             var aa = new TreeMap[Long, Array[AverageActivity]]
-
-            for (pa <- personalActivities)
+            for (pa <- selected)
               aa = aa + (pa.pid -> bucket.personalAverageActivity(pa.pid, samples))
-
-            val path = Path("./data/stats/" + prefix + ".csv")
-            println("  Writing: " + path)
-            val out = new BufferedWriter(new FileWriter(path.toFile))
-            try {
-              val (_, first) = aa.first
-              for (i <- 0 until first.size) {
-                for (ary <- aa.values)
-                  out.write("%.8f,".format(ary(i).total))
-                out.write("\n")
-              }
-            } finally {
-              out.close
-            }
-
             aa
           }
 
-        println
-        println("Extract Average Activity of Most Active People...")
-
-        val mostActiveAvgAct = extractAverageActivity("mostActiveAveragePeople", 30, mostActivePersonal)
-
-        println
-        println("Extract Average Activity of Most Central People...")
-
-        val mostCentralAvgAct = extractAverageActivity("mostCentralAveragePeople", 30, mostCentralPersonal)
+          (extract(mostActivePersonal), extract(mostCentralPersonal))
+        }
+        writeAverageActivity("mostActiveAveragePeople", mostActiveAvgAct)
+        writeAverageActivity("mostCentralAveragePeople", mostCentralAvgAct)
 
         //---------------------------------------------------------------------------------------------------
 
         val numFrames = 787
-        
+
         // DUMMY FOR NOW
         val averageTraffic = {
           val rtn = new Array[TreeSet[AverageTraffic]](numFrames)
@@ -271,7 +116,7 @@ object EnronVizApp {
             validID = validID + pi.pid
 
           val avgtr = biTrafficTotals.filter(t => validID.contains(t.sendID) && validID.contains(t.recvID))
-          for(i <- 0 until numFrames)
+          for (i <- 0 until numFrames)
             rtn(i) = TreeSet[AverageTraffic]() ++ (avgtr.filter(_ => scala.math.random < 0.01).map(AverageTraffic(_, 1)))
 
           rtn
@@ -545,6 +390,175 @@ object EnronVizApp {
   }
 
   //-----------------------------------------------------------------------------------------------------------------------------------
+  //   C S V   O U T P U T 
+  //-----------------------------------------------------------------------------------------------------------------------------------
+
+  /** */
+  def writeMonthlyTotals(perMonth: TreeMap[Long, Long]) {
+    val path = Path("./data/stats/monthlyTotals.csv")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      out.write("TIME STAMP,TOTAL E-MAILS\n")
+      for ((stamp, cnt) <- perMonth)
+        out.write(stamp + "," + cnt + "\n")
+    } finally {
+      out.close
+    }
+  }
+
+  /** */
+  def writePeople(ps: TreeMap[Long, Person]) {
+    val path = Path("./data/stats/people.csv")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      out.write("PERSON ID,UNIFIED ID,NAME\n")
+      for ((_, p) <- ps)
+        out.write(p.pid + "," + p.unified + "," + p.name + "\n")
+    } finally {
+      out.close
+    }
+  }
+
+  /** */
+  def readMostCentral(numPeople: Int): TreeSet[PersonalCentrality] = {
+    var central = new TreeSet[PersonalCentrality]
+
+    val path = Path("./data/stats/pidsRanked.csv")
+    val in = new BufferedReader(new FileReader(path.toFile))
+    try {
+      var done = false
+      while (!done) {
+        val line = in.readLine
+        if (line == null) {
+          done = true
+        } else {
+          try {
+            line.split(",") match {
+              case Array(_, p, s, _) =>
+                central = central + PersonalCentrality(p.filter(_ != '"').toLong, s.toDouble)
+              case _ =>
+            }
+          } catch {
+            case _ =>
+          }
+        }
+      }
+    } finally {
+      in.close
+    }
+
+    central.take(numPeople)
+  }
+
+  /** */
+  def writeDailyActivity(bucket: MailBucket) {
+    val samples = bucket.sampledPeriods
+
+    val path = Path("./data/stats/dailyActivity.csv")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      out.write("TIME STAMP,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS\n")
+      for (stamp <- samples) {
+        val act = bucket.totalPeriodActivity(stamp)
+        out.write(stamp + "," + act.total + "," + act.sent + "," + act.recv + "\n")
+      }
+    } finally {
+      out.close
+    }
+  }
+
+  /** */
+  def writePersonalActivity(totalPersonal: TreeSet[PersonalActivity], people: TreeMap[Long, Person]) {
+    val path = Path("./data/stats/personalActivity.csv")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      out.write("PERSON ID,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,NAME\n")
+      for (pa <- totalPersonal)
+        out.write(pa.pid + "," + pa.total + "," + pa.sent + "," + pa.recv + "," + people(pa.pid).name + "\n")
+    } finally {
+      out.close
+    }
+  }
+
+  /** */
+  def writeTrafficTotals(totals: List[Traffic]) {
+    val path = Path("./data/stats/trafficTotals.csv")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
+      for (t <- totals)
+        out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
+    } finally {
+      out.close
+    }
+  }
+
+  /** */
+  def writeBiTrafficTotals(totals: List[Traffic],
+                           mostActive: TreeSet[PersonalActivity],
+                           mostCentral: TreeSet[PersonalActivity]) {
+    val path = Path("./data/stats/biTrafficTotals.csv")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      out.write("PERSON-A ID,PERSON-B ID,TOTAL BIDIRECTIONAL E-MAILS\n")
+      for (t <- totals)
+        out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
+    } finally {
+      out.close
+    }
+
+    def writeSelected(prefix: String, selected: Traversable[PersonalIdentified]) {
+      var validID = TreeSet[Long]()
+      for (pi <- selected)
+        validID = validID + pi.pid
+
+      val tt = totals.filter(t => validID.contains(t.sendID) && validID.contains(t.recvID))
+
+      val path = Path("./data/stats/" + prefix + ".csv")
+      println("  Writing: " + path)
+      val out = new BufferedWriter(new FileWriter(path.toFile))
+      try {
+        out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
+        for (t <- tt)
+          out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
+      } finally {
+        out.close
+      }
+    }
+
+    println
+    println("Extract Directional Traffic of Most Active People...")
+    writeSelected("mostActiveTrafficTotals", mostActive)
+
+    println
+    println("Extract Directional Traffic of Most Central People...")
+    writeSelected("mostCentralTrafficTotals", mostCentral)
+  }
+
+  /** */
+  def writeAverageActivity(prefix: String, avgActivities: TreeMap[Long, Array[AverageActivity]]) = {
+    val path = Path("./data/stats/" + prefix + ".csv")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      val (_, first) = avgActivities.first
+      for (i <- 0 until first.size) {
+        for (ary <- avgActivities.values)
+          out.write("%.8f,".format(ary(i).total))
+        out.write("\n")
+      }
+    } finally {
+      out.close
+    }
+  }
+
+  //-----------------------------------------------------------------------------------------------------------------------------------
   //   G E O M E T R Y
   //-----------------------------------------------------------------------------------------------------------------------------------
 
@@ -798,12 +812,12 @@ object EnronVizApp {
         pc = pc + 4
       }
 
-      val traffic = "traffic" 
+      val traffic = "traffic"
       val geo = GeoWriter(pts.size, idxs.size, primAttrs = List(PrimitiveFloatAttr(traffic, 0)))
       geo.writeHeader(out)
-      
+
       for (p <- pts.reverseIterator) geo.writePoint(out, p)
-      
+
       geo.writePrimAttrs(out)
       for ((idx, c) <- idxs.reverseIterator) {
         geo.setPrimAttr(traffic, c)
