@@ -3,7 +3,7 @@ package org.spiffy.enron
 import org.scalagfx.io.Path
 import org.scalagfx.math.{ Pos2d, Pos3d, Index3i, Frame2d, Scalar }
 import org.scalagfx.houdini.geo.GeoWriter
-import org.scalagfx.houdini.geo.attr.{ PrimitiveIntAttr }
+import org.scalagfx.houdini.geo.attr.{ PrimitiveIntAttr, PrimitiveFloatAttr }
 
 import collection.mutable.HashMap
 import collection.immutable.{ Queue, SortedSet, TreeMap, TreeSet }
@@ -222,10 +222,9 @@ object EnronVizApp {
 
         //---------------------------------------------------------------------------------------------------
 
-        def extractAverageActivity(
-          prefix: String,
-          samples: Int,
-          personalActivities: Traversable[PersonalIdentified]): TreeMap[Long, Array[AverageActivity]] =
+        def extractAverageActivity(prefix: String,
+                                   samples: Int,
+                                   personalActivities: Traversable[PersonalIdentified]): TreeMap[Long, Array[AverageActivity]] =
           {
             var aa = new TreeMap[Long, Array[AverageActivity]]
 
@@ -261,11 +260,30 @@ object EnronVizApp {
 
         //---------------------------------------------------------------------------------------------------
 
+        val numFrames = 787
+        
+        // DUMMY FOR NOW
+        val averageTraffic = {
+          val rtn = new Array[TreeSet[AverageTraffic]](numFrames)
+
+          var validID = TreeSet[Long]()
+          for (pi <- mostCentralPersonal)
+            validID = validID + pi.pid
+
+          val avgtr = biTrafficTotals.filter(t => validID.contains(t.sendID) && validID.contains(t.recvID))
+          for(i <- 0 until numFrames)
+            rtn(i) = TreeSet[AverageTraffic]() ++ (avgtr.filter(_ => scala.math.random < 0.01).map(AverageTraffic(_, 1)))
+
+          rtn
+        }
+
+        //---------------------------------------------------------------------------------------------------
+
         if (false) {
           println
           println("Generating Most Active Personal Activity Geometry...")
 
-          for (frame <- 0 until 787) {
+          for (frame <- 0 until numFrames) {
             generatePersonalActivityGeo(
               Path("./artwork/houdini/geo"), "mostActivePersonalActivity", frame,
               mostActivePersonal, mostActiveAvgAct)
@@ -278,10 +296,23 @@ object EnronVizApp {
           println
           println("Generating Most Central Personal Activity Geometry...")
 
-          for (frame <- 0 until 787) {
+          for (frame <- 0 until numFrames) {
             generatePersonalActivityGeo(
               Path("./artwork/houdini/geo"), "mostCentralPersonalActivity", frame,
               mostCentral, mostCentralPersonal, mostCentralAvgAct)
+          }
+        }
+
+        //---------------------------------------------------------------------------------------------------
+
+        if (true) {
+          println
+          println("Generating Traffic Link Geometry...")
+
+          for (frame <- 0 until numFrames) {
+            generateTrafficGeo(
+              Path("./artwork/houdini/geo"), "trafficLinks", frame,
+              mostCentral, averageTraffic)
           }
         }
 
@@ -714,6 +745,81 @@ object EnronVizApp {
       out.close
     }
   }
+
+  /** Generate polygonal lines in Houdini GEO format for traffic between people.
+    * @param outdir Path to the directory where the GEO files are written.
+    * @param prefix The GEO filename prefix.
+    * @param frame The number of the frame to generate.
+    * @param centrality The eigenvector centrality of the people to graph sorted by score.
+    * @param averages The average traffic on each frame of the history sorted by traffic count
+    * (zero count entries are ommitted).
+    */
+  def generateTrafficGeo(outdir: Path,
+                         prefix: String,
+                         frame: Int,
+                         centrality: TreeSet[PersonalCentrality],
+                         averages: Array[TreeSet[AverageTraffic]]) {
+
+    import scala.math.{ ceil, log, Pi }
+    val path = outdir + (prefix + ".%04d.geo".format(frame))
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      val tpi = Pi * 2.0
+      val tm = tpi / 180.0
+      val total = centrality.toList.map(_.normScore).reduce(_ + _)
+
+      // angles for center of each pid
+      val theta = {
+        val tm = new HashMap[Long, Double]
+        var off = 0.0
+        for (cent <- centrality) {
+          tm += (cent.pid -> (((off + (cent.normScore * 0.5)) * tpi) / total))
+          off = off + cent.normScore
+        }
+        tm
+      }
+
+      var pts = List[Pos3d]()
+      var idxs = List[(List[Int], Double)]()
+
+      val half = List(Pos2d(1.0, 0.0), Pos2d(0.5, 0.0))
+      val rhalf = half.reverse
+
+      var pc = 0
+      for (tr <- averages(frame)) {
+        val List(fr, rfr) = List(tr.sendID, tr.recvID).map(id => Frame2d.rotate(theta(id)))
+        for (p <- half)
+          pts = (fr xform p).toPos3d :: pts
+        for (p <- rhalf)
+          pts = (rfr xform p).toPos3d :: pts
+
+        idxs = (List(pc, pc + 1, pc + 2, pc + 3), tr.count) :: idxs
+        pc = pc + 4
+      }
+
+      val traffic = "traffic" 
+      val geo = GeoWriter(pts.size, idxs.size, primAttrs = List(PrimitiveFloatAttr(traffic, 0)))
+      geo.writeHeader(out)
+      
+      for (p <- pts.reverseIterator) geo.writePoint(out, p)
+      
+      geo.writePrimAttrs(out)
+      for ((idx, c) <- idxs.reverseIterator) {
+        geo.setPrimAttr(traffic, c)
+        geo.writePolyLine(out, idx)
+      }
+
+      geo.writeFooter(out)
+
+    } finally {
+      out.close
+    }
+  }
+
+  //-----------------------------------------------------------------------------------------------------------------------------------
+  //   H S C R I P T
+  //-----------------------------------------------------------------------------------------------------------------------------------
 
   /** Generate a label in Houdini HScript format for each person around the circular graph.
     * @param outdir Path to the directory where the HScript files are written.

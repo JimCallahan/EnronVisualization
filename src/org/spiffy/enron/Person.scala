@@ -8,7 +8,8 @@ package org.spiffy.enron
   * @param name Canonicalized personal name: real name or e-mail prefix derived.
   */
 class Person private (val pid: Long, val unified: Long, val name: String)
-  extends PersonalIdentified {
+  extends PersonalIdentified 
+{
   override def toString = "Person(pid=" + pid + ", unified=" + unified + ", name=\"" + name + "\")"
 }
 

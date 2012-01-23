@@ -9,7 +9,8 @@ package org.spiffy.enron
 class PersonalActivity private (val pid: Long, sent: Long, recv: Long)
   extends Activity(sent, recv)
   with PersonalIdentified
-  with Ordered[PersonalActivity] {
+  with Ordered[PersonalActivity] 
+{
   /** Ordered in descending total number of e-mails and ascending IDs. */
   def compare(that: PersonalActivity): Int =
     (that.total compare total) match {
