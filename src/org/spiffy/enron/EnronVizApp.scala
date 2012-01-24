@@ -3,10 +3,10 @@ package org.spiffy.enron
 import org.scalagfx.io.Path
 import org.scalagfx.math.{ Pos2d, Pos3d, Index3i, Frame2d, Scalar }
 import org.scalagfx.houdini.geo.GeoWriter
-import org.scalagfx.houdini.geo.attr.{ PrimitiveIntAttr, PrimitiveFloatAttr }
+import org.scalagfx.houdini.geo.attr.{ PointFloatAttr, PrimitiveIntAttr }
 
 import collection.mutable.HashMap
-import collection.immutable.{ Queue, SortedSet, TreeMap, TreeSet }
+import collection.immutable.{ SortedSet, TreeMap, TreeSet }
 
 import java.sql.{ Connection, DriverManager, ResultSet, SQLException, Timestamp }
 import java.util.{ Calendar, Date, GregorianCalendar }
@@ -27,11 +27,11 @@ object EnronVizApp {
         // Number of people to display in the graph.
         val numPeople = 100
 
-        // Number of frames of animation to generate.
-        val numFrames = 787
+        // The sampling window (in frames).
+        val window = 30
 
         // Whether to generate geometry for the most active people.
-        val genActive = true
+        val genActive = false
 
         // Whether to generate geometry for the most central (eigenvector centrality) people.
         val genCentral = true
@@ -42,46 +42,12 @@ object EnronVizApp {
         // The directory to write Houdini HScript format files.
         val hsdir = Path("./artwork/houdini/hscript")
 
-        //---------------------------------------------------------------------------------------------------
-
         // Generate the average activity ring geometry and labels for the most central people.
-        val (range @ (firstMonth, lastMonth), mostCentral) =
-          generateActivityRing(conn, numPeople, numFrames, genActive, genCentral, geodir, hsdir)
-
-        //---------------------------------------------------------------------------------------------------
+        val (samples, people, mostCentral) =
+          generateActivityRing(conn, numPeople, window, genActive, genCentral, geodir, hsdir)
 
         // Generate link curves for the average traffic between the most central people. 
-        val averageTraffic = new Array[TreeSet[AverageTraffic]](numFrames)
-
-        /*
-    {
-      val rtn = new Array[TreeSet[AverageTraffic]](numFrames)
-
-      var validID = TreeSet[Long]()
-      for (pi <- mostCentralPersonal)
-        validID = validID + pi.pid
-
-      val avgtr = biTrafficTotals.filter(t => validID.contains(t.sendID) && validID.contains(t.recvID))
-      for (i <- 0 until numFrames)
-        rtn(i) = TreeSet[AverageTraffic]() ++ (avgtr.filter(_ => scala.math.random < 0.01).map(AverageTraffic(_, 1)))
-
-      rtn
-    }
-    
-
-        if (genCentral) {
-          println
-          println("Generating Traffic Link Geometry...")
-
-          for (frame <- 0 until numFrames) {
-            generateTrafficGeo(
-              Path("./artwork/houdini/geo"), "trafficLinks", frame,
-              mostCentral, averageTraffic)
-          }
-        }
-*/
-
-        //---------------------------------------------------------------------------------------------------
+        generateTrafficLinks(conn, samples, window, geodir, people, mostCentral)
 
         println
         println("ALL DONE!")
@@ -99,26 +65,26 @@ object EnronVizApp {
   /** Generate the average activity ring geometry and labels for the most central people.
     * @param conn The SQL connection.
     * @param numPeople Number of people to display in the graph.
-    * @param numFrames Number of frames of animation to generate.
+    * @param window The sampling window (in frames).
     * @param genActive Whether to generate geometry for the most active people.
     * @param genCentral Whether to generate geometry for the most central (eigenvector centrality) people.
-    * @return The active time range (start, end) in milliseconds UTC and the set of most central people.
+    * @return The sampling range and interval, the directory of all valid people and the set of most central people.
     */
-  def generateActivityRing(
-    conn: Connection,
-    numPeople: Int,
-    numFrames: Int,
-    genActive: Boolean,
-    genCentral: Boolean,
-    geodir: Path,
-    hsdir: Path): ((Long, Long), TreeSet[PersonalCentrality]) = {
+  def generateActivityRing(conn: Connection,
+                           numPeople: Int,
+                           window: Int,
+                           genActive: Boolean,
+                           genCentral: Boolean,
+                           geodir: Path,
+                           hsdir: Path): (Samples, TreeMap[Long, Person], TreeSet[PersonalCentrality]) = {
 
     println("Determining the Active Interval...")
-    val range @ (firstMonth, lastMonth) = {
+    val samples = {
+      val interval = 24 * 60 * 60 * 1000 // 24-hours
       val threshold = 10000
       val mt = activeMonths(conn, threshold)
       writeMonthlyTotals(mt)
-      (mt.firstKey, mt.lastKey)
+      Samples(mt.firstKey, mt.lastKey, interval)
     }
 
     println
@@ -129,13 +95,12 @@ object EnronVizApp {
     println
     println("Extract Most Central (" + numPeople + ") People...")
     val mostCentral = readMostCentral(numPeople)
+    writeSelectedMostCentral(mostCentral)
 
     println
     println("Collect Daily Activity...")
-    val bucket = {
-      val interval = 24 * 60 * 60 * 1000 // 24-hours
-      collectMail(conn, people, range, interval)
-    }
+    val bucket = collectMail(conn, people, samples)
+    val numFrames = bucket.size - window + 1
     writeDailyActivity(bucket)
 
     println
@@ -150,14 +115,13 @@ object EnronVizApp {
       (totalPersonal.take(numPeople), totalPersonal.filter(pa => centralIDs.contains(pa.pid)))
     }
 
-    println
-    println("Collect Directional Traffic Counts...")
-    val biTrafficTotals = {
-      val (tt, bi) = collectTrafficTotals(conn, people, range)
+    { // REMOVE THIS -- Replaced by TrafficBucket
+      println
+      println("Collect Directional Traffic Counts...")
+      val (tt, bi) = collectTrafficTotals(conn, people, samples)
       writeTrafficTotals(tt)
       writeBiTrafficTotals(bi, mostActivePersonal, mostCentralPersonal)
-      bi
-    }
+    } // REMOVE THIS
 
     println
     println("Extract Average Activity of Most Active/Central People...")
@@ -178,8 +142,7 @@ object EnronVizApp {
     if (genActive) {
       println
       println("Generating Most Active Personal Label HScript...")
-      generatePersonalActivityLabelHScript(
-        Path("./artwork/houdini/hscript"), "mostActiveLabels", "PeopleLabels", mostActivePersonal, people)
+      generatePersonalActivityLabelHScript(hsdir, "mostActiveLabels", "PeopleLabels", mostActivePersonal, people)
 
       println
       println("Generating Most Active Personal Activity Geometry...")
@@ -188,7 +151,7 @@ object EnronVizApp {
       print("  Writing: ")
       for (frame <- 0 until numFrames) {
         generatePersonalActivityGeo(geodir, prefix, frame, mostActivePersonal, mostActiveAvgAct)
-        if(frame%100 == 99) print(" [" + (frame+1) + "]\n           ") else print(".")
+        if (frame % 100 == 99) print(" [" + (frame + 1) + "]\n           ") else print(".")
       }
       println(" [" + numFrames + "] -- DONE!")
     }
@@ -205,12 +168,49 @@ object EnronVizApp {
       print("  Writing: ")
       for (frame <- 0 until numFrames) {
         generatePersonalActivityGeo(geodir, prefix, frame, mostCentral, mostCentralPersonal, mostCentralAvgAct)
-        if(frame%100 == 99) print(" [" + (frame+1) + "]\n           ") else print(".")
+        if (frame % 100 == 99) print(" [" + (frame + 1) + "]\n           ") else print(".")
       }
       println(" [" + numFrames + "] -- DONE.")
     }
 
-    (range, mostCentral)
+    (samples, people, mostCentral)
+  }
+
+  /** Generate the curves for the average traffic between the most central people.
+    * @param conn The SQL connection.
+    * @param samples The sampling range and interval.
+    * @param numFrames Number of frames of animation to generate.
+    * @param people The directory of all valid people.
+    * @param mostCentral The most central people.
+    */
+  def generateTrafficLinks(conn: Connection,
+                           samples: Samples,
+                           window: Int, 
+                           geodir: Path,
+                           people: TreeMap[Long, Person],
+                           mostCentral: TreeSet[PersonalCentrality]) {
+
+    val averageTraffic = {
+	  println
+      println("Collecting Traffic...")
+      val bucket = collectTraffic(conn, people, mostCentral.map(_.pid), samples)
+      writeBiTrafficTotals(bucket.totalBiTraffic)
+
+      bucket.averageBiTraffic(window)
+    }
+
+    val numFrames = averageTraffic.size
+
+    println
+    println("Generating Traffic Link Geometry...")
+    val prefix = "mostCentralTraffic"
+    println("  GEO Files: " + (geodir + prefix) + ".%04d-%04d.geo".format(0, numFrames))
+    print("  Writing: ")
+    for (frame <- 0 until numFrames) {
+      generateTrafficGeo(geodir, "trafficLinks", frame, mostCentral, averageTraffic)
+      if (frame % 100 == 99) print(" [" + (frame + 1) + "]\n           ") else print(".")
+    }
+    println(" [" + numFrames + "] -- DONE.")
   }
 
   //-----------------------------------------------------------------------------------------------------------------------------------
@@ -319,13 +319,12 @@ object EnronVizApp {
     * of symmetric Traffic entries with identical counts between any two people included.
     * @param conn The SQL connection.
     * @param people The person directory.
-    * @param range The (start, end) time stamps of the time period under consideration.
+    * @param samples The sampling range and interval.
     * @return The one-way traffic totals between all people and the bi-directional exchange traffic totals.
     */
   def collectTrafficTotals(conn: Connection,
                            people: TreeMap[Long, Person],
-                           range: (Long, Long)): (List[Traffic], List[Traffic]) = {
-    val (first, last) = range
+                           samples: Samples): (List[Traffic], List[Traffic]) = {
     val table = new HashMap[Long, HashMap[Long, Long]]
     val cal = new GregorianCalendar
 
@@ -341,7 +340,7 @@ object EnronVizApp {
         cal.setTime(ts)
         val ms = cal.getTimeInMillis
 
-        if ((first <= ms) && (ms <= last) && people.contains(sid)) {
+        if (samples.inRange(ms) && people.contains(sid)) {
           val sendID = people(sid).unified
           val receivers = table.getOrElseUpdate(sendID, new HashMap[Long, Long])
           receivers += (rid -> (receivers.getOrElse(rid, 0L) + 1L))
@@ -378,20 +377,20 @@ object EnronVizApp {
   /** Collects e-mail activity for each user over fixed intervals of time.
     * @param conn The SQL connection.
     * @param people The person directory.
-    * @param range The (start, end) time stamps of the time period under consideration.
-    * @param interval The number of milliseconds in each time period.
+    * @param samples The sampling range and interval.
     */
-  def collectMail(conn: Connection,
-                  people: TreeMap[Long, Person],
-                  range: (Long, Long),
-                  interval: Long): MailBucket = {
-    val (first, last) = range
-    val bucket = new MailBucket
+  def collectTraffic(conn: Connection,
+                     people: TreeMap[Long, Person],
+                     mostCentral: TreeSet[Long],
+                     samples: Samples): TrafficBucket = {
+
+    val bucket = TrafficBucket(samples)
     val cal = new GregorianCalendar
 
     val st = conn.createStatement
-    val rs = st.executeQuery("SELECT messagedt, senderid, personid FROM recipients, messages " +
-      "WHERE recipients.messageid = messages.messageid")
+    val rs = st.executeQuery(
+      "SELECT messagedt, senderid, personid FROM recipients, messages " +
+        "WHERE recipients.messageid = messages.messageid")
     while (rs.next) {
       try {
         val ts = rs.getTimestamp(1)
@@ -401,9 +400,49 @@ object EnronVizApp {
         cal.setTime(ts)
         val ms = cal.getTimeInMillis
 
-        if ((first <= ms) && (ms <= last)) {
+        if (samples.inRange(ms)) {
           (people.get(sid), people.get(rid)) match {
-            case (Some(s), Some(r)) => bucket.inc(ms - ((ms - first) % interval), s.unified, r.unified)
+            case (Some(s), Some(r)) =>
+              if (mostCentral.contains(s.unified) && mostCentral.contains(r.unified))
+                bucket.inc(samples.intervalStart(ms), s.unified, r.unified)
+            case _ =>
+          }
+        }
+      } catch {
+        case _: SQLException => // Ignore invalid time stamps.
+      }
+    }
+
+    bucket
+  }
+
+  /** Collects e-mail activity for each user over fixed intervals of time.
+    * @param conn The SQL connection.
+    * @param people The person directory.
+    * @param samples The sampling range and interval.
+    */
+  def collectMail(conn: Connection,
+                  people: TreeMap[Long, Person],
+                  samples: Samples): MailBucket = {
+    val bucket = MailBucket(samples)
+    val cal = new GregorianCalendar
+
+    val st = conn.createStatement
+    val rs = st.executeQuery(
+      "SELECT messagedt, senderid, personid FROM recipients, messages " +
+        "WHERE recipients.messageid = messages.messageid")
+    while (rs.next) {
+      try {
+        val ts = rs.getTimestamp(1)
+        val sid = rs.getInt(2)
+        val rid = rs.getInt(3)
+
+        cal.setTime(ts)
+        val ms = cal.getTimeInMillis
+
+        if (samples.inRange(ms)) {
+          (people.get(sid), people.get(rid)) match {
+            case (Some(s), Some(r)) => bucket.inc(samples.intervalStart(ms), s.unified, r.unified)
             case _                  =>
           }
         }
@@ -451,7 +490,8 @@ object EnronVizApp {
   def readMostCentral(numPeople: Int): TreeSet[PersonalCentrality] = {
     var central = new TreeSet[PersonalCentrality]
 
-    val path = Path("./data/stats/pidsRanked.csv")
+    val path = Path("./data/source/pidsRanked.csv")
+    println("  Reading: " + path)
     val in = new BufferedReader(new FileReader(path.toFile))
     try {
       var done = false
@@ -476,6 +516,20 @@ object EnronVizApp {
     }
 
     central.take(numPeople)
+  }
+
+  /** Write the selected most central (eigenvector centrality) people. */
+  def writeSelectedMostCentral(central: TreeSet[PersonalCentrality]) {
+    val path = Path("./data/stats/mostCentral.csv")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      out.write("PERSON ID,SCORE\n")
+      for (c <- central)
+        out.write(c.pid + "," + c.score + "\n")
+    } finally {
+      out.close
+    }
   }
 
   /** Write the daily total e-mail activity counts. */
@@ -510,7 +564,7 @@ object EnronVizApp {
     }
   }
 
-  /** Write the total number of e-mails sent from one person to another. */ 
+  /** Write the total number of e-mails sent from one person to another. */
   def writeTrafficTotals(totals: List[Traffic]) {
     val path = Path("./data/stats/trafficTotals.csv")
     println("  Writing: " + path)
@@ -525,10 +579,25 @@ object EnronVizApp {
   }
 
   /** Write the total number of bidirectional e-mail exchanges between pairs of people (minimum of A->B and B->A traffic) */
+  def writeBiTrafficTotals(totals: TreeSet[BiTraffic]) {
+    val path = Path("./data/stats/biTrafficTotals.csv")
+    println("  Writing: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      out.write("PERSON-A ID,PERSON-B ID,TOTAL E-MAILS A to B, TOTAL EMAILS B to A\n")
+      for (t <- totals)
+        out.write(t.sendID + "," + t.recvID + "," + t.send + "," + t.recv + "\n")
+    } finally {
+      out.close
+    }
+  }
+
+  /** Write the total number of bidirectional e-mail exchanges between pairs of people (minimum of A->B and B->A traffic) */
+  @deprecated
   def writeBiTrafficTotals(totals: List[Traffic],
                            mostActive: TreeSet[PersonalActivity],
                            mostCentral: TreeSet[PersonalActivity]) {
-    val path = Path("./data/stats/biTrafficTotals.csv")
+    val path = Path("./data/stats/biTrafficTotals-Depr.csv")
     println("  Writing: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
@@ -790,17 +859,16 @@ object EnronVizApp {
     * @param frame The number of the frame to generate.
     * @param centrality The eigenvector centrality of the people to graph sorted by score.
     * @param averages The average traffic on each frame of the history sorted by traffic count
-    * (zero count entries are ommitted).
+    * (zero count entries are omitted).
     */
   def generateTrafficGeo(outdir: Path,
                          prefix: String,
                          frame: Int,
                          centrality: TreeSet[PersonalCentrality],
-                         averages: Array[TreeSet[AverageTraffic]]) {
+                         averages: Array[TreeSet[AverageBiTraffic]]) {
 
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".%04d.geo".format(frame))
-    println("  Writing: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
       val tpi = Pi * 2.0
@@ -818,35 +886,36 @@ object EnronVizApp {
         tm
       }
 
-      var pts = List[Pos3d]()
-      var idxs = List[(List[Int], Double)]()
+      var pts = List[(Pos3d, Double)]()
+      var idxs = List[List[Int]]()
 
-      val half = List(Pos2d(1.0, 0.0), Pos2d(0.5, 0.0))
+      val half = List(Pos2d(1.0, 0.0), Pos2d(0.6, 0.0))
       val rhalf = half.reverse
 
       var pc = 0
       for (tr <- averages(frame)) {
         val List(fr, rfr) = List(tr.sendID, tr.recvID).map(id => Frame2d.rotate(theta(id)))
         for (p <- half)
-          pts = (fr xform p).toPos3d :: pts
+          pts = ((fr xform p).toPos3d, tr.send) :: pts
         for (p <- rhalf)
-          pts = (rfr xform p).toPos3d :: pts
+          pts = ((rfr xform p).toPos3d, tr.recv) :: pts
 
-        idxs = (List(pc, pc + 1, pc + 2, pc + 3), tr.count) :: idxs
+        idxs = List(pc, pc + 1, pc + 2, pc + 3) :: idxs
         pc = pc + 4
       }
 
       val traffic = "traffic"
-      val geo = GeoWriter(pts.size, idxs.size, primAttrs = List(PrimitiveFloatAttr(traffic, 0)))
+      val geo = GeoWriter(pts.size, idxs.size, pointAttrs = List(PointFloatAttr(traffic, 0.0)))
       geo.writeHeader(out)
 
-      for (p <- pts.reverseIterator) geo.writePoint(out, p)
-
-      geo.writePrimAttrs(out)
-      for ((idx, c) <- idxs.reverseIterator) {
-        geo.setPrimAttr(traffic, c)
-        geo.writePolyLine(out, idx)
+      geo.writePointAttrs(out)
+      for ((p, tr) <- pts.reverseIterator) {
+        geo.setPointAttr(traffic, tr)
+        geo.writePoint(out, p)
       }
+
+      for (idx <- idxs.reverseIterator)
+        geo.writePolyLine(out, idx)
 
       geo.writeFooter(out)
 
@@ -958,14 +1027,12 @@ object EnronVizApp {
   /** Generate a label in Houdini HScript format
     * @param outdir Path to the directory where the HScript files are written.
     * @param sopName The name of the Geometry SOP to create to hold the labels.
-    * @param range The (start, end) time stamps of the time period under consideration.
-    * @param interval The number of milliseconds in each time period.
+    * @param samples The sampling range and interval.
     */
   def generateDateLabelHScript(outdir: Path,
                                prefix: String,
                                sopName: String,
-                               range: (Long, Long),
-                               interval: Long) {
+                               samples: Samples) {
     val path = outdir + (prefix + ".hscript")
     println("  Writing: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))

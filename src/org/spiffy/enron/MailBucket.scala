@@ -4,7 +4,8 @@ import collection.mutable.HashMap
 import collection.immutable.{ Queue, SortedSet, TreeMap, TreeSet }
 
 /** A counter of e-mails sent and received by each person at each point in time. */
-class MailBucket {
+class MailBucket(val firstStamp: Long, val lastStamp: Long, val interval: Long)
+  extends TimeSampled {
   /** Internal storage for counters: stamp -> pid -> activity */
   private var table = new HashMap[Long, HashMap[Long, Activity]]
 
@@ -18,14 +19,6 @@ class MailBucket {
     m += (sendID -> m.getOrElseUpdate(sendID, Activity()).incSend)
     m += (recvID -> m.getOrElseUpdate(sendID, Activity()).incRecv)
   }
-
-  /** The range of times stored.
-    * @return The first and last period time stamps (in UTC milliseconds).
-    */
-  def timeRange: (Long, Long) =
-    ((Long.MaxValue, 0L) /: table.keys) {
-      case ((first, last), stamp) => (first min stamp, last max stamp)
-    }
 
   /** The time period sample time stamps. */
   def sampledPeriods: TreeSet[Long] =
@@ -56,30 +49,28 @@ class MailBucket {
     * @param pid The unique personal identifier (people.personid).
     */
   def personalActivity(pid: Long): Array[Activity] = {
-    val stamps = new TreeSet[Long] ++ table.keySet
-    val rtn = new Array[Activity](stamps.size)
-    var i = 0
-    for (stamp <- stamps) {
+    val rtn = Array.fill(size)(Activity())
+    for (stamp <- table.keySet) {
+      val i = intervalIndex(stamp)
       rtn(i) = if (!table.contains(stamp)) Activity()
       else table(stamp).getOrElse(pid, Activity())
-      i = i + 1
     }
     rtn
   }
 
   /** Get the average e-mail activity history of a given person for each time period.
     * @param pid The unique personal identifier (people.personid).
-    * @param samples The number of samples to average.
+    * @param window The number of samples to average.
     */
-  def personalAverageActivity(pid: Long, samples: Int): Array[AverageActivity] = {
-    var q = Queue[Activity]()
-    for (act <- personalActivity(pid)) yield {
-      q = q.enqueue(act)
-      while (q.size > samples) {
-        val (_, nq) = q.dequeue
-        q = nq
-      }
-      AverageActivity(q.reduce(_ + _), samples)
+  def personalAverageActivity(pid: Long, window: Int): Array[AverageActivity] = {
+    val rtn = for (as <- personalActivity(pid).sliding(window)) yield { 
+      AverageActivity(as.reduce(_ + _), window)
     }
+    rtn.toArray
   }
+}
+
+object MailBucket {
+  def apply(sampled: TimeSampled) =
+    new MailBucket(sampled.firstStamp, sampled.lastStamp, sampled.interval)
 }
