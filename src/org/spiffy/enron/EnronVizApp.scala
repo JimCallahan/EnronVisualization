@@ -1,12 +1,13 @@
 package org.spiffy.enron
 
 import org.scalagfx.io.Path
-import org.scalagfx.math.{ Pos2d, Pos3d, Index3i, Frame2d, Scalar }
+import org.scalagfx.math.{ Pos2d, Pos3d, Index2i, Index3i, Frame2d, Scalar }
 import org.scalagfx.houdini.geo.GeoWriter
 import org.scalagfx.houdini.geo.attr.{ PointFloatAttr, PrimitiveIntAttr }
 
 import collection.mutable.HashMap
 import collection.immutable.{ SortedSet, TreeMap, TreeSet }
+import scala.xml.XML
 
 import java.sql.{ Connection, DriverManager, ResultSet, SQLException, Timestamp }
 import java.util.{ Calendar, Date, GregorianCalendar }
@@ -42,12 +43,15 @@ object EnronVizApp {
         // The directory to write Houdini HScript format files.
         val hsdir = Path("./artwork/houdini/hscript")
 
+        // The directory to write XML format files.
+        val xmldir = Path("./data/xml")
+
         // Generate the average activity ring geometry and labels for the most central people.
         val (samples, people, mostCentral) =
           generateActivityRing(conn, numPeople, window, genActive, genCentral, geodir, hsdir)
 
         // Generate link curves for the average traffic between the most central people. 
-        generateTrafficLinks(conn, samples, window, geodir, people, mostCentral)
+        generateTrafficLinks(conn, samples, window, geodir, xmldir + Path("links"), people, mostCentral)
 
         println
         println("ALL DONE!")
@@ -115,14 +119,6 @@ object EnronVizApp {
       (totalPersonal.take(numPeople), totalPersonal.filter(pa => centralIDs.contains(pa.pid)))
     }
 
-    { // REMOVE THIS -- Replaced by TrafficBucket
-      println
-      println("Collect Directional Traffic Counts...")
-      val (tt, bi) = collectTrafficTotals(conn, people, samples)
-      writeTrafficTotals(tt)
-      writeBiTrafficTotals(bi, mostActivePersonal, mostCentralPersonal)
-    } // REMOVE THIS
-
     println
     println("Extract Average Activity of Most Active/Central People...")
     val (mostActiveAvgAct, mostCentralAvgAct) = {
@@ -179,19 +175,22 @@ object EnronVizApp {
   /** Generate the curves for the average traffic between the most central people.
     * @param conn The SQL connection.
     * @param samples The sampling range and interval.
-    * @param numFrames Number of frames of animation to generate.
+    * @param window The size of the sampling window.
+    * @param geodir The Houdini GEO format output file directory.
+    * @param xmldir The XML output file directory.
     * @param people The directory of all valid people.
     * @param mostCentral The most central people.
     */
   def generateTrafficLinks(conn: Connection,
                            samples: Samples,
-                           window: Int, 
+                           window: Int,
                            geodir: Path,
+                           xmldir: Path,
                            people: TreeMap[Long, Person],
                            mostCentral: TreeSet[PersonalCentrality]) {
 
     val averageTraffic = {
-	  println
+      println
       println("Collecting Traffic...")
       val bucket = collectTraffic(conn, people, mostCentral.map(_.pid), samples)
       writeBiTrafficTotals(bucket.totalBiTraffic)
@@ -208,6 +207,16 @@ object EnronVizApp {
     print("  Writing: ")
     for (frame <- 0 until numFrames) {
       generateTrafficGeo(geodir, "trafficLinks", frame, mostCentral, averageTraffic)
+      if (frame % 100 == 99) print(" [" + (frame + 1) + "]\n           ") else print(".")
+    }
+    println(" [" + numFrames + "] -- DONE.")
+
+    println
+    println("Generating Traffic Link XML...")
+    println("  XML Files: " + (xmldir + prefix) + ".%04d-%04d.xml".format(0, numFrames))
+    print("  Writing: ")
+    for (frame <- 0 until numFrames) {
+      generateTrafficXML(xmldir, "trafficLinks", frame, mostCentral, averageTraffic)
       if (frame % 100 == 99) print(" [" + (frame + 1) + "]\n           ") else print(".")
     }
     println(" [" + numFrames + "] -- DONE.")
@@ -592,57 +601,13 @@ object EnronVizApp {
     }
   }
 
-  /** Write the total number of bidirectional e-mail exchanges between pairs of people (minimum of A->B and B->A traffic) */
-  @deprecated
-  def writeBiTrafficTotals(totals: List[Traffic],
-                           mostActive: TreeSet[PersonalActivity],
-                           mostCentral: TreeSet[PersonalActivity]) {
-    val path = Path("./data/stats/biTrafficTotals-Depr.csv")
-    println("  Writing: " + path)
-    val out = new BufferedWriter(new FileWriter(path.toFile))
-    try {
-      out.write("PERSON-A ID,PERSON-B ID,TOTAL BIDIRECTIONAL E-MAILS\n")
-      for (t <- totals)
-        out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
-    } finally {
-      out.close
-    }
-
-    def writeSelected(prefix: String, selected: Traversable[PersonalIdentified]) {
-      var validID = TreeSet[Long]()
-      for (pi <- selected)
-        validID = validID + pi.pid
-
-      val tt = totals.filter(t => validID.contains(t.sendID) && validID.contains(t.recvID))
-
-      val path = Path("./data/stats/" + prefix + ".csv")
-      println("  Writing: " + path)
-      val out = new BufferedWriter(new FileWriter(path.toFile))
-      try {
-        out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
-        for (t <- tt)
-          out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
-      } finally {
-        out.close
-      }
-    }
-
-    println
-    println("Extract Directional Traffic of Most Active People...")
-    writeSelected("mostActiveTrafficTotals", mostActive)
-
-    println
-    println("Extract Directional Traffic of Most Central People...")
-    writeSelected("mostCentralTrafficTotals", mostCentral)
-  }
-
   /** Write the average amount of e-mail activity each day for each person. */
   def writeAverageActivity(prefix: String, avgActivities: TreeMap[Long, Array[AverageActivity]]) = {
     val path = Path("./data/stats/" + prefix + ".csv")
     println("  Writing: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
-      val (_, first) = avgActivities.first
+      val (_, first) = avgActivities.head
       for (i <- 0 until first.size) {
         for (ary <- avgActivities.values)
           out.write("%.8f,".format(ary(i).total))
@@ -919,6 +884,64 @@ object EnronVizApp {
 
       geo.writeFooter(out)
 
+    } finally {
+      out.close
+    }
+  }
+
+  /** Generate bundled edges in XML format for traffic between people.
+    * @param outdir Path to the directory where the XML files are written.
+    * @param prefix The XML filename prefix.
+    * @param frame The number of the frame to generate.
+    * @param centrality The eigenvector centrality of the people to graph sorted by score.
+    * @param averages The average traffic on each frame of the history sorted by traffic count
+    * (zero count entries are omitted).
+    */
+  def generateTrafficXML(outdir: Path,
+                         prefix: String,
+                         frame: Int,
+                         centrality: TreeSet[PersonalCentrality],
+                         averages: Array[TreeSet[AverageBiTraffic]]) {
+
+    import scala.math.{ ceil, log, Pi }
+    val path = outdir + (prefix + ".%04d.xml".format(frame))
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      val tpi = Pi * 2.0
+      val tm = tpi / 180.0
+      val total = centrality.toList.map(_.normScore).reduce(_ + _)
+
+      // angles for center of each pid
+      val theta = {
+        val tm = new HashMap[Long, Double]
+        var off = 0.0
+        for (cent <- centrality) {
+          tm += (cent.pid -> (((off + (cent.normScore * 0.5)) * tpi) / total))
+          off = off + cent.normScore
+        }
+        tm
+      }
+
+      val bitraffic = averages(frame)
+      val bundler = ForceDirectedEdgeBundler(bitraffic.size, 3)
+
+      val half = List(Pos2d(1.0, 0.0), Pos2d(0.6, 0.0))
+      val rhalf = half.reverse
+
+      var eidx = 0
+      for (tr <- bitraffic) {
+        val List(fr, rfr) = List(tr.sendID, tr.recvID).map(id => Frame2d.rotate(theta(id)))
+        for ((v, vidx) <- (half.map(p => fr xform p) ::: half.map(p => fr xform p)).zipWithIndex)
+          bundler(Index2i(eidx, vidx)) = v
+        eidx = eidx + 1
+      }
+
+      val xml =
+        <Links>{ bundler.toXML }<Traffic>{
+          bitraffic.toList.map(b => <SendRecv>{ "%.6f %.6f".format(b.send, b.recv) }</SendRecv>)
+        }</Traffic></Links>
+
+      XML.write(out, xml, "UTF-8", false, null)
     } finally {
       out.close
     }
