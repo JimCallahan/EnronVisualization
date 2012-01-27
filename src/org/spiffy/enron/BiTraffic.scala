@@ -24,19 +24,7 @@ class BiTraffic private (val sendID: Long, val recvID: Long, val send: Long, val
   /** Total number of emails sent in both directions. */ 
   def total = send + recv
   
-  /** Bidirectional total (minimum of each direction) number of emails sent. */
-  def bidir = send min recv
-  
-  /** Accumulate message counts. */
-  def +(that: BiTraffic) = BiTraffic(sendID, recvID, send + that.send, recv + that.recv)
-
-  /** Increment to the sent count. */
-  def incSend = BiTraffic(sendID, recvID, send + 1, recv)
-
-  /** Increment to the receive count. */
-  def incRecv = BiTraffic(sendID, recvID, send, recv + 1)
-
-  override def toString = "Traffic(sendID=" + sendID + ", recvID=" + recvID + ", send=" + send + ", recv=" + recv + ")"
+  override def toString = "BiTraffic(sendID=" + sendID + ", recvID=" + recvID + ", send=" + send + ", recv=" + recv + ")"
 }
 
 object BiTraffic {

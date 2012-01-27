@@ -24,10 +24,7 @@ class AverageBiTraffic private (val sendID: Long, val recvID: Long, val send: Do
   /** Total number of emails sent in both directions. */ 
   def total = send + recv
   
-  /** Bidirectional total (minimum of each direction) number of emails sent. */
-  def bidir = send min recv
-  
-  override def toString = "AverageTraffic(sendID=%d, recvID=%d, send=%.6f, recv=%.6f)".format(sendID, recvID, send, recv)
+  override def toString = "AverageBiTraffic(sendID=%d, recvID=%d, send=%.6f, recv=%.6f)".format(sendID, recvID, send, recv)
 }
 
 object AverageBiTraffic {

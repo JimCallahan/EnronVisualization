@@ -2,7 +2,7 @@ package org.spiffy.enron
 
 import org.scalagfx.math.{ Pos2d, Vec2d, Index2i }
 
-import scala.xml.{ Elem }
+import scala.xml.Elem
 
 /** A solver for an algorithm that adjusts the positions of vertices in a collection of segmented edges
   * so that similar edges are bundled more closely together.  The edges typically represent the control

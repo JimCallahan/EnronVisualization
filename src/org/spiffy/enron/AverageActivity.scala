@@ -9,7 +9,7 @@ class AverageActivity private (val sent: Double, val recv: Double) {
   /** The average total number e-mails sent and received by the person. */
   def total = sent + recv
 
-  override def toString = "Activity(sent=%.4f, recv=%.4f)".format(sent, recv)
+  override def toString = "AverageActivity(sent=%.4f, recv=%.4f)".format(sent, recv)
 }
 
 object AverageActivity {

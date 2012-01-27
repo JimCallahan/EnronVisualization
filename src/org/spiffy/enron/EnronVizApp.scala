@@ -5,7 +5,7 @@ import org.scalagfx.math.{ Pos2d, Pos3d, Index2i, Index3i, Frame2d, Scalar }
 import org.scalagfx.houdini.geo.GeoWriter
 import org.scalagfx.houdini.geo.attr.{ PointFloatAttr, PrimitiveIntAttr }
 
-import collection.mutable.HashMap
+import collection.mutable.{ HashMap, HashSet }
 import collection.immutable.{ SortedSet, TreeMap, TreeSet }
 import scala.xml.XML
 
@@ -29,7 +29,7 @@ object EnronVizApp {
         val numPeople = 100
 
         // The sampling window (in frames).
-        val window = 30
+        val window = 60
 
         // Whether to generate geometry for the most active people.
         val genActive = false
@@ -51,15 +51,20 @@ object EnronVizApp {
           generateActivityRing(conn, numPeople, window, genActive, genCentral, geodir, hsdir)
 
         // Generate link curves for the average traffic between the most central people. 
-        generateTrafficLinks(conn, samples, window, geodir, xmldir + Path("links"), people, mostCentral)
+        //generateTrafficLinks(conn, samples, window, geodir, xmldir + Path("links"), people, mostCentral)
+
+        // Generate link curves for the average sentiment of e-mails exchanged between the most central people. 
+        generateSentimentLinks(conn, samples, window, xmldir + Path("sentiment"), people, mostCentral)
 
         println
         println("ALL DONE!")
 
-      } finally {
+      }
+      finally {
         conn.close
       }
-    } catch {
+    }
+    catch {
       case ex =>
         println("Uncaught Exception: " + ex.getMessage + "\n" +
           "Stack Trace:\n" + ex.getStackTraceString)
@@ -199,14 +204,14 @@ object EnronVizApp {
     }
 
     val numFrames = averageTraffic.size
+    val prefix = "trafficLinks"
 
     println
     println("Generating Traffic Link Geometry...")
-    val prefix = "mostCentralTraffic"
     println("  GEO Files: " + (geodir + prefix) + ".%04d-%04d.geo".format(0, numFrames))
     print("  Writing: ")
     for (frame <- 0 until numFrames) {
-      generateTrafficGeo(geodir, "trafficLinks", frame, mostCentral, averageTraffic)
+      generateTrafficGeo(geodir, prefix, frame, mostCentral, averageTraffic)
       if (frame % 100 == 99) print(" [" + (frame + 1) + "]\n           ") else print(".")
     }
     println(" [" + numFrames + "] -- DONE.")
@@ -216,7 +221,46 @@ object EnronVizApp {
     println("  XML Files: " + (xmldir + prefix) + ".%04d-%04d.xml".format(0, numFrames))
     print("  Writing: ")
     for (frame <- 0 until numFrames) {
-      generateTrafficXML(xmldir, "trafficLinks", frame, mostCentral, averageTraffic)
+      generateTrafficXML(xmldir, prefix, frame, mostCentral, averageTraffic)
+      if (frame % 100 == 99) print(" [" + (frame + 1) + "]\n           ") else print(".")
+    }
+    println(" [" + numFrames + "] -- DONE.")
+  }
+
+  /** Generate the curves for the average traffic between the most central people.
+    * @param conn The SQL connection.
+    * @param samples The sampling range and interval.
+    * @param window The size of the sampling window.
+    * @param xmldir The XML output file directory.
+    * @param people The directory of all valid people.
+    * @param mostCentral The most central people.
+    */
+  def generateSentimentLinks(conn: Connection,
+                             samples: Samples,
+                             window: Int,
+                             xmldir: Path,
+                             people: TreeMap[Long, Person],
+                             mostCentral: TreeSet[PersonalCentrality]) {
+
+    val averageSentiment = {
+      println
+      println("Collecting Sentiment:")
+      val bucket = collectSentiment(conn, people, mostCentral.map(_.pid), samples)
+      //writeBiSentimentTotals(bucket.totalBiSentiment)
+
+      println("  Averaging Sentiment...")
+      bucket.averageBiSentiment(window)
+    }
+
+    val numFrames = averageSentiment.size
+    val prefix = "sentimentLinks"
+
+    println
+    println("Generating Sentiment Link XML...")
+    println("  XML Files: " + (xmldir + prefix) + ".%04d-%04d.xml".format(0, numFrames))
+    print("  Writing: ")
+    for (frame <- 0 until numFrames) {
+      generateSentimentXML(xmldir, prefix, frame, mostCentral, averageSentiment)
       if (frame % 100 == 99) print(" [" + (frame + 1) + "]\n           ") else print(".")
     }
     println(" [" + numFrames + "] -- DONE.")
@@ -251,7 +295,8 @@ object EnronVizApp {
         val ms = cal.getTimeInMillis
 
         perMonth += ms -> (perMonth.getOrElse(ms, 0L) + 1L)
-      } catch {
+      }
+      catch {
         case _: SQLException => // Ignore invalid time stamps.
       }
     }
@@ -272,7 +317,7 @@ object EnronVizApp {
     val rs = st.executeQuery("SELECT personid, email, name FROM people")
     while (rs.next) {
       try {
-        val pid = rs.getInt(1).toLong
+        val pid = rs.getLong(1)
         val addr = rs.getString(2)
         val nm = rs.getString(3)
 
@@ -289,7 +334,8 @@ object EnronVizApp {
           if (nm != null) {
             val n = nm.filter(_ != '"')
             if (n.size > 0) n else prefix
-          } else prefix
+          }
+          else prefix
 
         // Toss out bogus addresses.
         (name, domain) match {
@@ -313,7 +359,8 @@ object EnronVizApp {
             }
           }
         }
-      } catch {
+      }
+      catch {
         case _: SQLException => // Ignore invalid people.
       }
     }
@@ -343,8 +390,8 @@ object EnronVizApp {
     while (rs.next) {
       try {
         val ts = rs.getTimestamp(1)
-        val sid = rs.getInt(2).toLong
-        val rid = rs.getInt(3).toLong
+        val sid = rs.getLong(2)
+        val rid = rs.getLong(3)
 
         cal.setTime(ts)
         val ms = cal.getTimeInMillis
@@ -354,7 +401,8 @@ object EnronVizApp {
           val receivers = table.getOrElseUpdate(sendID, new HashMap[Long, Long])
           receivers += (rid -> (receivers.getOrElse(rid, 0L) + 1L))
         }
-      } catch {
+      }
+      catch {
         case _: SQLException => // Ignore invalid people.
       }
     }
@@ -403,8 +451,8 @@ object EnronVizApp {
     while (rs.next) {
       try {
         val ts = rs.getTimestamp(1)
-        val sid = rs.getInt(2)
-        val rid = rs.getInt(3)
+        val sid = rs.getLong(2)
+        val rid = rs.getLong(3)
 
         cal.setTime(ts)
         val ms = cal.getTimeInMillis
@@ -417,11 +465,89 @@ object EnronVizApp {
             case _ =>
           }
         }
-      } catch {
+      }
+      catch {
         case _: SQLException => // Ignore invalid time stamps.
       }
     }
 
+    bucket
+  }
+
+  /** Collects e-mail activity for each user over fixed intervals of time.
+    * @param conn The SQL connection.
+    * @param people The person directory.
+    * @param samples The sampling range and interval.
+    */
+  def collectSentiment(conn: Connection,
+                       people: TreeMap[Long, Person],
+                       mostCentral: TreeSet[Long],
+                       samples: Samples): SentimentBucket = {
+
+    val bucket = SentimentBucket(samples)
+    val cal = new GregorianCalendar
+
+    val messageIDs = new HashSet[Long]()
+    
+    {
+      println("  Collecting Message Counts...")
+      val st = conn.createStatement
+      val rs = st.executeQuery(
+        "SELECT messagedt, senderid, personid, recipients.messageid FROM recipients, messages " +
+          "WHERE recipients.messageid = messages.messageid")
+      while (rs.next) {
+        try {
+          val ts = rs.getTimestamp(1)
+          val sid = rs.getLong(2)
+          val rid = rs.getLong(3)
+          val mid = rs.getLong(4)
+
+          cal.setTime(ts)
+          val ms = cal.getTimeInMillis
+
+          if (samples.inRange(ms)) {
+            (people.get(sid), people.get(rid)) match {
+              case (Some(s), Some(r)) =>
+                if (mostCentral.contains(s.unified) && mostCentral.contains(r.unified)) {
+                  bucket.inc(samples.intervalStart(ms), s.unified, r.unified, mid.toLong)
+                  messageIDs += mid
+                }
+              case _ =>
+            }
+          }
+        }
+        catch {
+          case _: SQLException => // Ignore invalid time stamps.
+        }
+      }
+    }
+
+    val path = Path("./data/xml/FinancialDictionary.xml")
+    val dict = FinancialDictionary.loadXML(path)
+    import FinancialTerm._
+
+    println("  Classifying E-Mail Text...")
+    var cnt = 0L
+    for (mid <- messageIDs) {
+      val st = conn.prepareStatement("SELECT body FROM bodies WHERE messageid = ?")
+      st.setLong(1, mid)      
+      val rs = st.executeQuery
+      //val st = conn.createStatement
+      //val rs = st.executeQuery("SELECT body FROM bodies WHERE messageid = " + mid)
+      while (rs.next) {
+        try {
+          val msg = rs.getString(1)
+          bucket.addTerms(mid, msg.split("\\p{Space}").map(dict.classify _))
+        }
+        catch {
+          case _: SQLException => // Ignore invalid time stamps.
+        }
+      }
+    }
+    
+    println("  Collating Results...")
+    bucket.collate
+    
     bucket
   }
 
@@ -455,7 +581,8 @@ object EnronVizApp {
             case _                  =>
           }
         }
-      } catch {
+      }
+      catch {
         case _: SQLException => // Ignore invalid time stamps.
       }
     }
@@ -476,7 +603,8 @@ object EnronVizApp {
       out.write("TIME STAMP,TOTAL E-MAILS\n")
       for ((stamp, cnt) <- perMonth)
         out.write(stamp + "," + cnt + "\n")
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -490,7 +618,8 @@ object EnronVizApp {
       out.write("PERSON ID,UNIFIED ID,NAME\n")
       for ((_, p) <- ps)
         out.write(p.pid + "," + p.unified + "," + p.name + "\n")
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -508,19 +637,22 @@ object EnronVizApp {
         val line = in.readLine
         if (line == null) {
           done = true
-        } else {
+        }
+        else {
           try {
             line.split(",") match {
               case Array(_, p, s, _) =>
                 central = central + PersonalCentrality(p.filter(_ != '"').toLong, s.toDouble)
               case _ =>
             }
-          } catch {
+          }
+          catch {
             case _ =>
           }
         }
       }
-    } finally {
+    }
+    finally {
       in.close
     }
 
@@ -536,7 +668,8 @@ object EnronVizApp {
       out.write("PERSON ID,SCORE\n")
       for (c <- central)
         out.write(c.pid + "," + c.score + "\n")
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -554,7 +687,8 @@ object EnronVizApp {
         val act = bucket.totalPeriodActivity(stamp)
         out.write(stamp + "," + act.total + "," + act.sent + "," + act.recv + "\n")
       }
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -568,7 +702,8 @@ object EnronVizApp {
       out.write("PERSON ID,TOTAL E-MAILS,SENT E-MAILS,RECEIVED E-MAILS,NAME\n")
       for (pa <- totalPersonal)
         out.write(pa.pid + "," + pa.total + "," + pa.sent + "," + pa.recv + "," + people(pa.pid).name + "\n")
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -582,7 +717,8 @@ object EnronVizApp {
       out.write("SENDER ID,RECEIVER ID,TOTAL E-MAILS\n")
       for (t <- totals)
         out.write(t.sendID + "," + t.recvID + "," + t.count + "\n")
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -596,7 +732,8 @@ object EnronVizApp {
       out.write("PERSON-A ID,PERSON-B ID,TOTAL E-MAILS A to B, TOTAL EMAILS B to A\n")
       for (t <- totals)
         out.write(t.sendID + "," + t.recvID + "," + t.send + "," + t.recv + "\n")
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -613,7 +750,8 @@ object EnronVizApp {
           out.write("%.8f,".format(ary(i).total))
         out.write("\n")
       }
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -710,7 +848,8 @@ object EnronVizApp {
       }
 
       geo.writeFooter(out)
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -813,7 +952,8 @@ object EnronVizApp {
       }
 
       geo.writeFooter(out)
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -884,7 +1024,8 @@ object EnronVizApp {
 
       geo.writeFooter(out)
 
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -923,18 +1064,12 @@ object EnronVizApp {
       }
 
       val bitraffic = averages(frame)
-      val bundler = ForceDirectedEdgeBundler(bitraffic.size, 3)
+      val bundler = ForceDirectedEdgeBundler(bitraffic.size, 1)
 
-      val half = List(Pos2d(1.0, 0.0), Pos2d(0.6, 0.0))
-      val rhalf = half.reverse
-
-      var eidx = 0
-      for (tr <- bitraffic) {
-        val List(fr, rfr) = List(tr.sendID, tr.recvID).map(id => Frame2d.rotate(theta(id)))
-        for ((v, vidx) <- (half.map(p => fr xform p) ::: half.map(p => fr xform p)).zipWithIndex)
-          bundler(Index2i(eidx, vidx)) = v
-        eidx = eidx + 1
-      }
+      for (
+        (tr, eidx) <- bitraffic.zipWithIndex;
+        (fr, vidx) <- List(tr.sendID, tr.recvID).map(id => Frame2d.rotate(theta(id))).zipWithIndex
+      ) bundler(Index2i(eidx, vidx)) = fr xform Pos2d(1.0, 0.0)
 
       val xml =
         <Links>{ bundler.toXML }<Traffic>{
@@ -942,7 +1077,58 @@ object EnronVizApp {
         }</Traffic></Links>
 
       XML.write(out, xml, "UTF-8", false, null)
-    } finally {
+    }
+    finally {
+      out.close
+    }
+  }
+
+  def generateSentimentXML(outdir: Path,
+                           prefix: String,
+                           frame: Int,
+                           centrality: TreeSet[PersonalCentrality],
+                           averages: Array[TreeSet[AverageBiSentiment]]) {
+
+    import scala.math.{ ceil, log, Pi }
+    val path = outdir + (prefix + ".%04d.xml".format(frame))
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      val tpi = Pi * 2.0
+      val tm = tpi / 180.0
+      val total = centrality.toList.map(_.normScore).reduce(_ + _)
+
+      // angles for center of each pid
+      val theta = {
+        val tm = new HashMap[Long, Double]
+        var off = 0.0
+        for (cent <- centrality) {
+          tm += (cent.pid -> (((off + (cent.normScore * 0.5)) * tpi) / total))
+          off = off + cent.normScore
+        }
+        tm
+      }
+
+      val bisnt = averages(frame)
+      val bundler = ForceDirectedEdgeBundler(bisnt.size, 3)
+
+      for ((tr, eidx) <- bisnt.zipWithIndex) {
+        List(tr.sendID, tr.recvID).map(id => Frame2d.rotate(theta(id))) match {
+          case List(sfr, rfr) => {
+            bundler(Index2i(eidx, 0)) = sfr xform Pos2d(1.0, 0.0) 
+            bundler(Index2i(eidx, 1)) = sfr xform Pos2d(0.5, 0.0) 
+            bundler(Index2i(eidx, 2)) = rfr xform Pos2d(0.5, 0.0) 
+            bundler(Index2i(eidx, 3)) = rfr xform Pos2d(1.0, 0.0) 
+          }
+          case _ => // Shouldn't ever happen.
+        }
+      }
+
+      val xml =
+        <Links>{ bundler.toXML }<AverageBiSentiment>{ bisnt.toList.map(_.toXML) }</AverageBiSentiment></Links>
+
+      XML.write(out, xml, "UTF-8", false, null)
+    }
+    finally {
       out.close
     }
   }
@@ -994,7 +1180,8 @@ object EnronVizApp {
         off = off + pa.total
         cnt = cnt + 1
       }
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -1030,10 +1217,15 @@ object EnronVizApp {
       for (pc <- centrality) {
         val tm = ((off.toDouble + pc.normScore * 0.5) * 360.0) / total
 
+        val label = {
+          val parts = people(pc.pid).name.split("\\p{Space}")
+          parts.head(0) + " " + parts.drop(1).reduce(_ + " " + _)
+        }
+        
         val font = "font" + cnt
         val xform = "xform" + cnt
         out.write("opadd -n font " + font + "\n" +
-          "opparm " + font + " text ( '" + people(pc.pid).name + "' ) fontsize ( 0.03 ) hcenter ( off ) lod ( 1 )\n" +
+          "opparm " + font + " text ( '" + label + "' ) fontsize ( 0.03 ) hcenter ( off ) lod ( 1 )\n" +
           "opadd -n xform " + xform + "\n" +
           "opparm " + xform + " xOrd ( trs ) t ( %.6f 0 0 ) r ( 0 0 %.6f )\n".format(r, tm) +
           "opwire -n " + font + " -0 " + xform + "\n" +
@@ -1042,7 +1234,8 @@ object EnronVizApp {
         off = off + pc.normScore
         cnt = cnt + 1
       }
-    } finally {
+    }
+    finally {
       out.close
     }
   }
@@ -1061,7 +1254,8 @@ object EnronVizApp {
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
 
-    } finally {
+    }
+    finally {
       out.close
     }
   }

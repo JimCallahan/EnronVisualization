@@ -16,7 +16,7 @@ class TrafficBucket(val firstStamp: Long, val lastStamp: Long, val interval: Lon
   def inc(stamp: Long, sendID: Long, recvID: Long) {
     val sm = table.getOrElseUpdate(stamp, new HashMap[Long, HashMap[Long, Long]])
     val rm = sm.getOrElseUpdate(sendID, new HashMap[Long, Long])
-    rm += (recvID -> (rm.getOrElseUpdate(sendID, 0L) + 1L))
+    rm += (recvID -> (rm.getOrElseUpdate(recvID, 0L) + 1L))
   }
 
   /** Get the total number of bidirectional e-mails sent between two people removing duplicates.
