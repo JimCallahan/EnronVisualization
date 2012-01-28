@@ -25,6 +25,9 @@ class BiSentiment private (val sendID: Long, val recvID: Long, val send: Sentime
   def total = send.sent + recv.sent
     
   override def toString = "BiSentiment(sendID=" + sendID + ", recvID=" + recvID + ", send=" + send + ", recv=" + recv + ")"
+  
+  /** Convert to XML representation. */
+  def toXML = <BiSent sendID={ sendID.toString } recvID={ recvID.toString }>{ send.toXML }{ recv.toXML }</BiSent>
 }
 
 object BiSentiment {

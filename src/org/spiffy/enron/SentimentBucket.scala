@@ -1,7 +1,13 @@
 package org.spiffy.enron
 
+import org.scalagfx.io.Path
+import org.scalagfx.math.Scalar
+
 import collection.mutable.HashMap
 import collection.immutable.{ Queue, SortedSet, TreeMap, TreeSet }
+
+import scala.xml.{ PrettyPrinter, XML }
+import java.io.{ BufferedWriter, FileWriter }
 
 class SentimentBucket(val firstStamp: Long, val lastStamp: Long, val interval: Long)
   extends TimeSampled {
@@ -114,40 +120,86 @@ class SentimentBucket(val firstStamp: Long, val lastStamp: Long, val interval: L
     rtn
   }
 
-    /** Get the average amount of e-mails sent from one person to another for each time period.
+  /** Get the average amount of e-mails sent from one person to another for each time period.
     * If the average is zero for a given time period, then the returned Traffic entry will be omitted.
     * @param window The number of samples to average.
     */
   def averageBiSentiment(window: Int): Array[TreeSet[AverageBiSentiment]] = {
     val rtn = Array.fill(size - window + 1) { new TreeSet[AverageBiSentiment]() }
 
-    for (btr <- totalBiSentiment) {
-      val srHist =
-        for (ca <- sentimentHistory(btr.sendID, btr.recvID).sliding(window)) yield {
-          val total = Sentiment()
-          for(snt <- ca)
-            total += snt
-          AverageSentiment(total, window)
-        }
+    val kern = {
+      val gauss =
+        (for (i <- 0 until window) yield {
+          val x = Scalar.lerp(-3.0, 3.0, i.toDouble / (window - 1).toDouble)
+          scala.math.pow(scala.math.E, -(x * x))
+        }).toArray
+      val area = gauss.reduce(_ + _)
+      gauss.map(_ / area)
+    }
 
-      val rsHist =
-        for (ca <- sentimentHistory(btr.recvID, btr.sendID).sliding(window)) yield {
-          val total = Sentiment()
-          for(snt <- ca)
-            total += snt
-          AverageSentiment(total, window)
-        }
+    for (bisnt <- totalBiSentiment) {
+      val srHist = sentimentHistory(bisnt.sendID, bisnt.recvID)
+      val srAvg =
+        (for (ca <- srHist.sliding(window)) yield {
+          (ca zip kern).map { case (a, k) => AverageSentiment(a) * k }.reduce(_ + _)
+        }).toArray
 
+      val rsHist = sentimentHistory(bisnt.recvID, bisnt.sendID)
+      val rsAvg =
+        (for (ca <- rsHist.sliding(window)) yield {
+          (ca zip kern).map { case (a, k) => AverageSentiment(a) * k }.reduce(_ + _)
+        }).toArray
+      
       var i = 0
-      for ((s, r) <- (srHist zip rsHist)) {
+      for ((s, r) <- (srAvg zip rsAvg)) {
         if ((s.words > 0.0) || (r.words > 0.0))
-          rtn(i) = rtn(i) + AverageBiSentiment(btr.sendID, btr.recvID, s, r)
+          rtn(i) = rtn(i) + AverageBiSentiment(bisnt.sendID, bisnt.recvID, s, r)
         i = i + 1
       }
     }
-
+    
     rtn
   }
+
+  /* Convert to XML representation. */
+  def toXML =
+    <SentimentBucket><MessagesTable>{
+      messages.map {
+        case (stamp, sm) =>
+          <Day stamp={ stamp.toString }>{
+            sm.map {
+              case (sendID, rm) =>
+                <Sender id={ sendID.toString }>{
+                  rm.map {
+                    case (recvID, msgIDs) =>
+                      <Receiver id={ recvID.toString }>{
+                        msgIDs.map(_.toString).reduce(_ + " " + _)
+                      }</Receiver>
+                  }
+                }</Sender>
+            }
+          }</Day>
+      }
+    }</MessagesTable><SentimentTable>{
+      sentiment.map {
+        case (msgID, snt) => <Message id={ msgID.toString }>{ snt.toXML }</Message>
+      }
+    }</SentimentTable><Table>{
+      table.map {
+        case (stamp, sm) =>
+          <Day stamp={ stamp.toString }>{
+            sm.map {
+              case (sendID, rm) =>
+                <Sender id={ sendID.toString }>{
+                  rm.map {
+                    case (recvID, snt) =>
+                      <Receiver id={ recvID.toString }>{ snt.toXML }</Receiver>
+                  }
+                }</Sender>
+            }
+          }</Day>
+      }
+    }</Table></SentimentBucket>
 }
 
 object SentimentBucket {

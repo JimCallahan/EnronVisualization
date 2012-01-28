@@ -24,9 +24,13 @@ class AverageBiSentiment private (val sendID: Long, val recvID: Long, val send: 
   /** Total number of e-mails sent in both directions. */ 
   def sent = send.sent + recv.sent
   
+  /** Total number of words sent in both directions. */ 
+  def words = send.words + recv.words
+  
   override def toString = "AverageBiSentiment(sendID=" + sendID + ", recvID=" + recvID + ", send=" + send + ", recv=" + recv + ")"
   
-  def toXML = <Link>{ send.toXML }{ recv.toXML }</Link>
+  /** Convert to XML representation. */
+  def toXML = <AvgBiSent sendID={ sendID.toString } recvID={ recvID.toString }>{ send.toXML }{ recv.toXML }</AvgBiSent>
 }
 
 object AverageBiSentiment {

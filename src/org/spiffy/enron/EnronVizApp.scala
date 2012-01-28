@@ -7,7 +7,7 @@ import org.scalagfx.houdini.geo.attr.{ PointFloatAttr, PrimitiveIntAttr }
 
 import collection.mutable.{ HashMap, HashSet }
 import collection.immutable.{ SortedSet, TreeMap, TreeSet }
-import scala.xml.XML
+import scala.xml.{ PrettyPrinter, XML }
 
 import java.sql.{ Connection, DriverManager, ResultSet, SQLException, Timestamp }
 import java.util.{ Calendar, Date, GregorianCalendar }
@@ -29,7 +29,7 @@ object EnronVizApp {
         val numPeople = 100
 
         // The sampling window (in frames).
-        val window = 60
+        val window = 30
 
         // Whether to generate geometry for the most active people.
         val genActive = false
@@ -488,7 +488,7 @@ object EnronVizApp {
     val cal = new GregorianCalendar
 
     val messageIDs = new HashSet[Long]()
-    
+
     {
       println("  Collecting Message Counts...")
       val st = conn.createStatement
@@ -530,10 +530,8 @@ object EnronVizApp {
     var cnt = 0L
     for (mid <- messageIDs) {
       val st = conn.prepareStatement("SELECT body FROM bodies WHERE messageid = ?")
-      st.setLong(1, mid)      
+      st.setLong(1, mid)
       val rs = st.executeQuery
-      //val st = conn.createStatement
-      //val rs = st.executeQuery("SELECT body FROM bodies WHERE messageid = " + mid)
       while (rs.next) {
         try {
           val msg = rs.getString(1)
@@ -544,9 +542,43 @@ object EnronVizApp {
         }
       }
     }
+
+    /*
+    // DEBUG
+    {
+      val path = Path("./data/xml/debug/PreCollateSentimentBucket.xml")
+      println("  Writing: " + path)
+      val out = new BufferedWriter(new FileWriter(path.toFile))
+      try {
+        val pp = new PrettyPrinter(100, 2)
+        out.write(pp.formatNodes(bucket.toXML))
+      }
+      finally {
+        out.close
+      }
+    }
+    // DEBUG
+*/
     
     println("  Collating Results...")
     bucket.collate
+
+    /*
+    // DEBUG
+    {
+      val path = Path("./data/xml/debug/PostCollateSentimentBucket.xml")
+      println("  Writing: " + path)
+      val out = new BufferedWriter(new FileWriter(path.toFile))
+      try {
+        val pp = new PrettyPrinter(100, 2)
+        out.write(pp.formatNodes(bucket.toXML))
+      }
+      finally {
+        out.close
+      }
+    }
+    // DEBUG
+*/
     
     bucket
   }
@@ -1114,17 +1146,17 @@ object EnronVizApp {
       for ((tr, eidx) <- bisnt.zipWithIndex) {
         List(tr.sendID, tr.recvID).map(id => Frame2d.rotate(theta(id))) match {
           case List(sfr, rfr) => {
-            bundler(Index2i(eidx, 0)) = sfr xform Pos2d(1.0, 0.0) 
-            bundler(Index2i(eidx, 1)) = sfr xform Pos2d(0.5, 0.0) 
-            bundler(Index2i(eidx, 2)) = rfr xform Pos2d(0.5, 0.0) 
-            bundler(Index2i(eidx, 3)) = rfr xform Pos2d(1.0, 0.0) 
+            bundler(Index2i(eidx, 0)) = sfr xform Pos2d(1.0, 0.0)
+            bundler(Index2i(eidx, 1)) = sfr xform Pos2d(0.5, 0.0)
+            bundler(Index2i(eidx, 2)) = rfr xform Pos2d(0.5, 0.0)
+            bundler(Index2i(eidx, 3)) = rfr xform Pos2d(1.0, 0.0)
           }
           case _ => // Shouldn't ever happen.
         }
       }
 
       val xml =
-        <Links>{ bundler.toXML }<AverageBiSentiment>{ bisnt.toList.map(_.toXML) }</AverageBiSentiment></Links>
+        <Links>{ bundler.toXML }<Attributes>{ bisnt.toList.map(_.toXML) }</Attributes></Links>
 
       XML.write(out, xml, "UTF-8", false, null)
     }
@@ -1221,7 +1253,7 @@ object EnronVizApp {
           val parts = people(pc.pid).name.split("\\p{Space}")
           parts.head(0) + " " + parts.drop(1).reduce(_ + " " + _)
         }
-        
+
         val font = "font" + cnt
         val xform = "xform" + cnt
         out.write("opadd -n font " + font + "\n" +
