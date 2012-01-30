@@ -13,10 +13,10 @@ trait TimeSampled {
   /** Whether the given time stamp is within the valid range. */
   def inRange(stamp: Long) = (firstStamp <= stamp) && (stamp <= lastStamp)
   
-  /** The number of milliseconds since the start of the containint sampling interval. */
+  /** The number of milliseconds since the start of the containing sample interval. */
   def relative(stamp: Long) = (stamp - firstStamp) % interval 
 
-  /** The time stamp (UTC milliseconds) of the start of the containing sampling interval. */
+  /** The time stamp (UTC milliseconds) of the start of the containing sample interval. */
   def intervalStart(stamp: Long) = stamp - relative(stamp)
 
   /** The index of the containing sampling interval. */
