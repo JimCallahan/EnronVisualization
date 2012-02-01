@@ -24,27 +24,25 @@ object EdgeBundlerApp {
 
       //Attribute names. */
       val attrNames = Array("litigious", "modalstrong", "negative", "positive", "uncertainty")
-  
-      val passes = 3
-      val iterations = 50
+
+      val passes = 1
+      val iterations = 60
       val converge = 0.0025
       val springConst = 6.0
-      val electroConst = 1.0
-      val radius = 0.35
+      val electroConst = 0.15
+      val radius = 0.2
       val minCompat = 0.0
       val step = Interval(1E-8, 0.01)
 
-      // The number of frames to process.
-      val numFrames = 4621
+      val densityRadius = 0.01
 
       println
       var icnt = 0
-      //for(attrName <- attrNames) {
-      //for (frame <- 1200 until 4200) {
-      for(attrName <- List("litigious")) {
-        for (frame <- 1800 until 1801) {
-        //  val (bundler, attrs) = readSentimentXML(xmldir, attrName, frame)
+      for (attrName <- attrNames) {
+        for (frame <- 1200 until 4200 by 100) {
+          val (bundler, attrs) = readSentimentXML(xmldir, attrName, frame)
 
+          /*
         val (bundler, attrs) = {
           val b = ForceDirectedEdgeBundler(9)
 
@@ -86,62 +84,50 @@ object EdgeBundlerApp {
 
           (b, Array.fill(b.numEdges)((0.0, 0.0)))
         }
-        
-        println("Solving...")
+        */
 
-        var result = bundler.retesselate(radius * 0.5)
-        result.prepare
-        generateSentimentGeo(geodir, "bundler-prepass", frame, result, attrs)
-        generatePrimaryDirDebugGeo(geodir, "bundler-primdirs", frame, result)
-        generateMidpointDebugGeo(geodir, "bundler-midpoints", frame, result)
+          var result = bundler.retesselate(radius * 0.5)
+          result.prepare
+          //generateSentimentGeo(geodir, "bundler-prepass", frame, result, attrs, densityRadius)
+          //generatePrimaryDirDebugGeo(geodir, "bundler-primdirs", frame, result)
+          //generateMidpointDebugGeo(geodir, "bundler-midpoints", frame, result)
 
-        println("------- PASS 1 ---------")
-        println("SpringConst=%.6f ElectroConst=%.6f Radius=%.6f MinCompat=%.6f Converge=%.6f Step=[%.6f,%.6f]"
-          .format(springConst, electroConst, radius, minCompat, converge, step.lower, step.upper))
+          //println("------- PASS 1 ---------")
+          //println("SpringConst=%.6f ElectroConst=%.6f Radius=%.6f MinCompat=%.6f Converge=%.6f Step=[%.6f,%.6f]"
+          // .format(springConst, electroConst, radius, minCompat, converge, step.lower, step.upper))
 
-        for (i <- 0 until iterations) {
-          result.iterate(springConst, electroConst, radius, minCompat, converge, step)
-          generateSentimentGeo(geodir, "bundler-iter." + icnt, frame, result, attrs)
-          icnt = icnt + 1
-        }
-
-        var it = iterations
-        var rd = radius
-        var cv = converge
-        var sp = step
-        for (p <- 2 to passes) {
-          it = (it * 2) / 3
-          rd = rd * 0.5
-          //cv = cv * 0.5
-          sp = Interval(sp.lower, sp.upper * 0.5)
-
-          println("Subdivide")
-          result = result.subdivide
-
-          println("------- PASS " + p + " ---------")
-          println("SpringConst=%.6f ElectroConst=%.6f Radius=%.6f MinCompat=%.6f Converge=%.6f Step=[%.6f,%.6f]"
-            .format(springConst, electroConst, rd, minCompat, cv, sp.lower, sp.upper))
-          for (_ <- 0 until it) {
-            result.iterate(springConst, electroConst, rd, minCompat, cv, sp)
-            generateSentimentGeo(geodir, "bundler-iter." + icnt, frame, result, attrs)
+          for (i <- 0 until iterations) {
+            result.iterate(springConst, electroConst, radius, minCompat, Some(attrs), converge, step)
+            //generateSentimentGeo(geodir, "bundler-iter." + icnt, frame, result, attrs, densityRadius)
             icnt = icnt + 1
           }
+
+          var it = iterations
+          var rd = radius
+          var cv = converge
+          var sp = step
+          for (p <- 2 to passes) {
+            it = (it * 2) / 3
+            rd = rd * 0.5
+            sp = Interval(sp.lower, sp.upper * 0.5)
+
+            println("Subdivide")
+            result = result.subdivide
+
+            println("------- PASS " + p + " ---------")
+            println("SpringConst=%.6f ElectroConst=%.6f Radius=%.6f MinCompat=%.6f Converge=%.6f Step=[%.6f,%.6f]"
+              .format(springConst, electroConst, rd, minCompat, cv, sp.lower, sp.upper))
+            for (_ <- 0 until it) {
+              result.iterate(springConst, electroConst, rd, minCompat, Some(attrs), cv, sp)
+              generateSentimentGeo(geodir, "bundler-iter." + icnt, frame, result, attrs, densityRadius)
+              icnt = icnt + 1
+            }
+          }
+
+          generateSentimentGeo(geodir, "bundler-" + attrName, frame, result, attrs, densityRadius)
+          println
         }
-
-        println
       }
-      }
-
-      /*
-      println
-      for (frame <- 0 until numFrames) {
-        val (bundler, sentiment) = readSentimentXML(xmldir, prefix, frame)
-        println("Solving...")
-        val result = subdivPrePass(bundler).solve(passes)
-        generateSentimentGeo(geodir, prefix + "Bundled", frame, result, sentiment)
-        println
-      }
-      */
 
       println
       println("ALL DONE!")
@@ -188,16 +174,17 @@ object EdgeBundlerApp {
                            prefix: String,
                            frame: Int,
                            bundler: ForceDirectedEdgeBundler,
-                           attrs: Array[(Double, Double)]) {
+                           attrs: Array[(Double, Double)],
+                           densityRadius: Double) {
 
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".%04d.geo".format(frame))
     println("Writing GEO File: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
-      val mag = "mag"
-      val pointAttrs = List(PointFloatAttr(mag, 0.0))
-      val primAttrs = List(PrimitiveFloatAttr(mag, 0.0))
+      val names @ List(mag, density) = List("mag", "density")
+      val pointAttrs = names.map(PointFloatAttr(_, 0.0))
+      val primAttrs = names.map(PrimitiveFloatAttr(_, 0.0))
 
       val numPts = (for (ei <- 0 until bundler.numEdges) yield bundler.edgeSegs(ei) + 1).reduce(_ + _)
       val geo = GeoWriter(numPts, bundler.numEdges, pointAttrs = pointAttrs, primAttrs = primAttrs)
@@ -214,6 +201,7 @@ object EdgeBundlerApp {
         for (pi <- 0 to numSegs) {
           val t = pi.toDouble / numSegs.toDouble
           geo.setPointAttr(mag, Scalar.lerp(s, r, t))
+          geo.setPointAttr(density, bundler.vertexDensity(Index2i(ei, pi), densityRadius))
           geo.writePoint(out, bundler(Index2i(ei, pi)).toPos3d)
           eidxs = icnt :: eidxs
           icnt = icnt + 1

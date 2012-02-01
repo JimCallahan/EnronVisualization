@@ -3,7 +3,7 @@ package org.spiffy.enron
 import org.scalagfx.math.{ Pos2d, Vec2d, Index2i, Scalar, Interval }
 
 import scala.xml.Elem
-import scala.math.{ E, abs, min, max, pow }
+import scala.math.{ E, abs, min, max, pow, sqrt }
 import collection.mutable.{ HashMap }
 
 /** A solver for an algorithm that adjusts the positions of vertices in a collection of segmented edges
@@ -40,6 +40,33 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
   def resizeEdge(idx: Int, numSegs: Int) {
     verts(idx) = Array.fill(numSegs + 1)(Pos2d(0.0))
   }
+
+  /** The normalized direction of the edge near the given vertex. */
+  def vertexDir(idx: Index2i): Vec2d = {
+    val (ai, bi) = if (idx.y > 0) (idx + Index2i(0, -1), idx) else (idx, idx + Index2i(0, 1))
+    (this(ai) - this(bi)).normalized
+  }
+
+  /** A measure of how many vertices reside near the location of the given vertex with similar edge direction. */
+  def vertexDensity(idx: Index2i, densityRadius: Double): Double = {
+    val (ei, vi) = (idx.x, idx.y)
+    val p = this(idx)
+    val d = vertexDir(idx)
+    val drSq = densityRadius * densityRadius
+    (for (oei <- 0 until numEdges; if (oei != ei)) yield {
+      (for (ovi <- 0 to edgeSegs(oei); if (ovi != vi)) yield {
+        val lenSq = (p - this(Index2i(oei, ovi))).lengthSq
+        if (lenSq > drSq) 0.0
+        else {
+          val wt = (d dot vertexDir(idx))
+          wt * gauss(sqrt(lenSq), densityRadius)
+        }
+      }).reduce(_ + _)
+    }).reduce(_ + _)
+  }
+
+  /** Normalized Gaussian function which decays to nearly zero at the given radius. */
+  private def gauss(x: Double, radius: Double) = pow(E, -1.0 * pow((x / radius) * 2.0, 2.0))
 
   //-----------------------------------------------------------------------------------------------------------------------------------
 
@@ -143,17 +170,17 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
       def project(q: Pos2d): Pos2d = {
         val pq = (q - p0)
         val len = pq.length
-        if(len < 1E-8) p0
-        else p0 + (pdir * (pq dot pdir)) 
+        if (len < 1E-8) p0
+        else p0 + (pdir * (pq dot pdir))
       }
       val l0 = project(q0)
       val l1 = project(q1)
       val lm = Pos2d.lerp(l0, l1, 0.5)
-      max(0.0, 1.0 - ((2.0 * (pm-lm).length) / ((l0 - l1).length)))
+      max(0.0, 1.0 - ((2.0 * (pm - lm).length) / ((l0 - l1).length)))
     }
 
     val av = vis(a0, a1, am, ad, b0, b1)
-    val bv = vis(b0, b1, bm, bd, a0, a1) 
+    val bv = vis(b0, b1, bm, bd, a0, a1)
     min(av, bv)
   }
 
@@ -195,6 +222,7 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
     * @param electroConst The strength of the electrostatic force between corresponding vertices of pairs of edges.
     * @param radius The distance at which the electrostatic force drops to zero.
     * @param minCompat The minimum total compatibility between edges for there to be electrostatic attraction.
+    * @param weights Optional electrostatic force weights for each edge end point, defaults to 1.0 if not specified.
     * @param converge The speed with which the solution converges: a small number less than one.
     * @param step Limits on the distance a point may move in one iteration. Lower: The threshold below which a point will
     * not be moved at all.  Upper: The maximum amount a point will be moved.
@@ -203,6 +231,7 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
               electroConst: Double,
               radius: Double,
               minCompat: Double,
+              weights: Option[Array[(Double, Double)]],
               converge: Double,
               step: Interval[Double]) {
     // Two less vertices per edge than edge positions, since end points don't move.
@@ -224,9 +253,12 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
       }
 
       // Electrostatic forced between all vertices of each edge scaled by compatibility measure.
-      def gauss(x: Double, r: Double) = pow(E, -1.0 * pow((x / r) * 2.0, 2.0))
       for (oei <- 0 until numEdges; if (ei != oei)) {
         val compat = totalCompat(ei, oei)
+        val (wtA, wtB) = weights match {
+          case Some(wts) => wts(oei)
+          case None      => (1.0, 1.0)
+        }
         if (compat > minCompat) {
           for (vi <- 1 until numSegs) {
             val v = this(Index2i(ei, vi))
@@ -237,7 +269,8 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
               val dist = vec.length
               if (!step.isBelow(dist) || (dist < radius)) {
                 val eforce = gauss(dist, radius) * electroConst
-                fs(vi - 1) = fs(vi - 1) + ((vec / dist) * eforce * compat)
+                val wt = Scalar.lerp(wtA, wtB, ovi.toDouble / onumSegs.toDouble)
+                fs(vi - 1) = fs(vi - 1) + ((vec / dist) * eforce * compat * wt)
               }
             }
           }
