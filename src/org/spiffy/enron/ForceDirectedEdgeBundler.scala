@@ -1,6 +1,6 @@
 package org.spiffy.enron
 
-import org.scalagfx.math.{ Pos2d, Vec2d, Index2i, Scalar }
+import org.scalagfx.math.{ Pos2d, Vec2d, Index2i, Scalar, Interval }
 
 import scala.xml.Elem
 import scala.math.{ E, abs, min, max, pow }
@@ -13,14 +13,11 @@ import collection.mutable.{ HashMap }
   * IEEE-VGTC Symposium on Visualization 2009).
   * @constructor
   * @param numEdges The total number of edges that will be processed.
-  * @param numSegs The number of segments (at least 2) in each edge.
   * @param original The original base solver (None if this is the original).
   */
-class ForceDirectedEdgeBundler private (val numEdges: Int,
-                                        val numSegs: Int,
-                                        original: Option[ForceDirectedEdgeBundler]) {
+class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[ForceDirectedEdgeBundler]) {
   /** The edge vertices. */
-  private val verts = Array.fill(numEdges)(Array.fill(numSegs + 1)(Pos2d(0.0)))
+  private val verts: Array[Array[Pos2d]] = Array.fill(numEdges)(null)
 
   /** Lookup the position of an edge vertex.
     * @param idx The (edge, vertex) index.
@@ -34,6 +31,14 @@ class ForceDirectedEdgeBundler private (val numEdges: Int,
     */
   def update(idx: Index2i, p: Pos2d) {
     verts(idx.x)(idx.y) = p
+  }
+
+  /** Get the number of segments in a specific edge. */
+  def edgeSegs(idx: Int): Int = verts(idx).size - 1
+
+  /** (Re)set the number of segments for a specific edge. */
+  def resizeEdge(idx: Int, numSegs: Int) {
+    verts(idx) = Array.fill(numSegs + 1)(Pos2d(0.0))
   }
 
   //-----------------------------------------------------------------------------------------------------------------------------------
@@ -124,12 +129,40 @@ class ForceDirectedEdgeBundler private (val numEdges: Int,
     lavg / (lavg + (a - b).length)
   }
 
+  /** Compute the visibility compatibility measure [0,1] between two edges.
+    * @param ai Index of edge A.
+    * @param bi Index of edge B.
+    */
+  def visibilityCompat(ai: Int, bi: Int): Double = {
+    val (a0, b0) = (this(Index2i(ai, 0)), this(Index2i(bi, 0)))
+    val (a1, b1) = (this(Index2i(ai, edgeSegs(ai))), this(Index2i(bi, edgeSegs(bi))))
+    val (am, bm) = (edgeMid(ai), edgeMid(bi))
+    val (ad, bd) = (edgeDir(ai), edgeDir(bi))
+
+    def vis(p0: Pos2d, p1: Pos2d, pm: Pos2d, pdir: Vec2d, q0: Pos2d, q1: Pos2d): Double = {
+      def project(q: Pos2d): Pos2d = {
+        val pq = (q - p0)
+        val len = pq.length
+        if(len < 1E-8) p0
+        else p0 + (pdir * (pq dot pdir)) 
+      }
+      val l0 = project(q0)
+      val l1 = project(q1)
+      val lm = Pos2d.lerp(l0, l1, 0.5)
+      max(0.0, 1.0 - ((2.0 * (pm-lm).length) / ((l0 - l1).length)))
+    }
+
+    val av = vis(a0, a1, am, ad, b0, b1)
+    val bv = vis(b0, b1, bm, bd, a0, a1) 
+    min(av, bv)
+  }
+
   /** Compute the total edge compatibility measure [0,1] between two edges.
     * @param ai Index of edge A.
     * @param bi Index of edge B.
     */
   def totalCompat(ai: Int, bi: Int): Double =
-    angleCompat(ai, bi) * lengthCompat(ai, bi) * positionCompat(ai, bi)
+    angleCompat(ai, bi) * lengthCompat(ai, bi) * positionCompat(ai, bi) * visibilityCompat(ai, bi)
 
   //-----------------------------------------------------------------------------------------------------------------------------------
 
@@ -160,55 +193,69 @@ class ForceDirectedEdgeBundler private (val numEdges: Int,
   /** Perform one iteration step of the algorithm.
     * @param springConst The strength of the spring constant between consecutive vertices of an edge.
     * @param electroConst The strength of the electrostatic force between corresponding vertices of pairs of edges.
-    * @param radius The radius at which the electrostatic force drops to zero.
+    * @param radius The distance at which the electrostatic force drops to zero.
+    * @param minCompat The minimum total compatibility between edges for there to be electrostatic attraction.
     * @param converge The speed with which the solution converges: a small number less than one.
-    * @param limits The (minmum, maximum) distance a point may move in one iteration.
+    * @param step Limits on the distance a point may move in one iteration. Lower: The threshold below which a point will
+    * not be moved at all.  Upper: The maximum amount a point will be moved.
     */
-  def iterate(springConst: Double, electroConst: Double, radius: Double, converge: Double, limits: (Double, Double)) {
+  def iterate(springConst: Double,
+              electroConst: Double,
+              radius: Double,
+              minCompat: Double,
+              converge: Double,
+              step: Interval[Double]) {
     // Two less vertices per edge than edge positions, since end points don't move.
-    val forces = Array.fill(numEdges)(Array.fill(numSegs - 1)(Vec2d(0.0)))
+    val forces: Array[Array[Vec2d]] = Array.fill(numEdges)(null)
 
     // Compute forces acting on each vertex.
     for (ei <- 0 until numEdges) {
+      val numSegs = edgeSegs(ei)
+      val fs = Array.fill(numSegs - 1)(Vec2d(0.0))
+      forces(ei) = fs
+
       // Spring forces between consecutive vertices.
-      val k = springConst / (edgeLength(ei) * numSegs.toDouble)
+      val k = springConst / (edgeLength(ei) / numSegs.toDouble)
       for (vi <- 1 until numSegs) {
         val vm = this(Index2i(ei, vi - 1))
         val v = this(Index2i(ei, vi))
         val vp = this(Index2i(ei, vi + 1))
-        val sforce = ((vm - v) + (vp - v)) * k
-        forces(ei)(vi - 1) = sforce
+        fs(vi - 1) = ((vm - v) + (vp - v)) * k
       }
 
-      // Electrostatic forced between corresponding vertices of each edge scaled by compatibility measure.
+      // Electrostatic forced between all vertices of each edge scaled by compatibility measure.
       def gauss(x: Double, r: Double) = pow(E, -1.0 * pow((x / r) * 2.0, 2.0))
       for (oei <- 0 until numEdges; if (ei != oei)) {
         val compat = totalCompat(ei, oei)
-        for (vi <- 1 until numSegs) {
-          val v = this(Index2i(ei, vi))
-          for (ovi <- 1 until numSegs) {
-            val vo = this(Index2i(oei, ovi))
-            val v2o = vo - v
-            val len = v2o.length
-            val eforce = if (len < 1E-6) Vec2d(0.0) else v2o * ((electroConst * gauss(len, radius)) / len)
-            forces(ei)(vi - 1) = forces(ei)(vi - 1) + eforce * compat
+        if (compat > minCompat) {
+          for (vi <- 1 until numSegs) {
+            val v = this(Index2i(ei, vi))
+            val onumSegs = edgeSegs(oei)
+            for (ovi <- 1 until onumSegs) {
+              val ov = this(Index2i(oei, ovi))
+              val vec = ov - v
+              val dist = vec.length
+              if (!step.isBelow(dist) || (dist < radius)) {
+                val eforce = gauss(dist, radius) * electroConst
+                fs(vi - 1) = fs(vi - 1) + ((vec / dist) * eforce * compat)
+              }
+            }
           }
         }
       }
     }
 
     /** Move the vertices. */
-    val (mind, maxd) = limits
     for (ei <- 0 until numEdges) {
+      val numSegs = edgeSegs(ei)
       for (vi <- 1 until numSegs) {
-        val delta = forces(ei)(vi - 1) * converge
-        val mag = delta.length
-        val step =
-          if (mag < mind) Vec2d(0.0)
-          else if (mag > maxd) delta * (maxd / mag)
-          else delta
-          
-        this(Index2i(ei, vi)) = this(Index2i(ei, vi)) + step
+        val cforce = forces(ei)(vi - 1) * converge
+        val dist = cforce.length
+        val delta =
+          if (step.isBelow(dist)) Vec2d(0.0)
+          else if (step.isAbove(dist)) (cforce / dist) * step.upper
+          else cforce
+        this(Index2i(ei, vi)) = this(Index2i(ei, vi)) + delta
       }
     }
   }
@@ -217,8 +264,10 @@ class ForceDirectedEdgeBundler private (val numEdges: Int,
     * the midpoint of all existing edge segments.
     */
   def subdivide: ForceDirectedEdgeBundler = {
-    val rtn = new ForceDirectedEdgeBundler(numEdges, numSegs * 2, Some(original.getOrElse(this)))
+    val rtn = new ForceDirectedEdgeBundler(numEdges, Some(original.getOrElse(this)))
     for (ei <- 0 until numEdges) {
+      val numSegs = edgeSegs(ei)
+      rtn.resizeEdge(ei, numSegs * 2)
       for (pi <- 0 until numSegs) {
         val a = this(Index2i(ei, pi))
         val b = this(Index2i(ei, pi + 1))
@@ -230,9 +279,29 @@ class ForceDirectedEdgeBundler private (val numEdges: Int,
     rtn
   }
 
+  /** Create a new solver in which the interior vertices of each edge are recreated by linearly interpolating the
+    * positions of its end points at regular intervals so that the resulting segments are no greater than the given
+    * length.
+    */
+  def retesselate(maxSegLength: Double): ForceDirectedEdgeBundler = {
+    val rtn = new ForceDirectedEdgeBundler(numEdges, original)
+    import scala.math.{ max, floor }
+    for (ei <- 0 until numEdges) {
+      val a = this(Index2i(ei, 0))
+      val b = this(Index2i(ei, edgeSegs(ei)))
+      val numSegs = max(2, scala.math.floor((b - a).length / maxSegLength).toInt)
+      rtn.resizeEdge(ei, numSegs)
+      rtn(Index2i(ei, 0)) = a
+      for (i <- 1 until numSegs)
+        rtn(Index2i(ei, i)) = Pos2d.lerp(a, b, i.toDouble / numSegs.toDouble)
+      rtn(Index2i(ei, numSegs)) = b
+    }
+    rtn
+  }
+
   /** Convert to an XML representation. */
   def toXML: Elem = {
-    <ForceDirectedEdgeBundler numEdges={ numEdges.toString } numSegs={ numSegs.toString }>{
+    <ForceDirectedEdgeBundler numEdges={ numEdges.toString }>{
       verts.map(e => <Edge>{ e.map(p => <Pos2d>{ "%.6f %.6f".format(p.x, p.y) }</Pos2d>) }</Edge>)
     }<Lengths>{
       original match {
@@ -269,27 +338,23 @@ class ForceDirectedEdgeBundler private (val numEdges: Int,
 object ForceDirectedEdgeBundler {
   /** Create a new solver.
     * @param numEdges The total number of edges that will be processed.
-    * @param numSegs The number of segments (at least 2) in each edge.
-    * @param springConst The strength of the spring constant between consecutive vertices of an edge.
-    * @param electroConst The strength of the electrostatic force between corresponding vertices of pairs of edges.
     */
-  def apply(numEdges: Int, numSegs: Int) = new ForceDirectedEdgeBundler(numEdges, numSegs, None)
+  def apply(numEdges: Int) = new ForceDirectedEdgeBundler(numEdges, None)
 
   /** Create a new bundler from XML data. */
   def fromXML(elem: Elem): ForceDirectedEdgeBundler = {
     val b = elem \\ "ForceDirectedEdgeBundler"
-    val (e, s) = (b \ "@numEdges", b \ "@numSegs")
-    val bundler = ForceDirectedEdgeBundler(e.text.toInt, s.text.toInt)
-    var eidx = 0
-    for (e <- b \\ "Edge") {
-      var pidx = 0
-      for (p <- e \\ "Pos2d") {
-        (p.text.trim.split(' ').map(_.toDouble)) match {
-          case Array(x, y) => bundler(Index2i(eidx, pidx)) = Pos2d(x, y)
+    val numEdges = (b \ "@numEdges").text.toInt
+    val bundler = ForceDirectedEdgeBundler(numEdges)
+    for ((e, ei) <- (b \\ "Edge").zipWithIndex) {
+      val verts = e \\ "Pos2d"
+      bundler.resizeEdge(ei, verts.size - 1)
+      for ((vert, vi) <- verts.zipWithIndex) {
+        val pts = vert.text.trim.split(' ')
+        (pts.map(_.toDouble)) match {
+          case Array(x, y) => bundler(Index2i(ei, vi)) = Pos2d(x, y)
         }
-        pidx = pidx + 1
       }
-      eidx = eidx + 1
     }
     bundler
   }

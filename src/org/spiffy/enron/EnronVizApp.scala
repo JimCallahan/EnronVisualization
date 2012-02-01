@@ -792,9 +792,10 @@ object EnronVizApp {
       }
 
       val bisnt = averages(frame)
-      val bundler = ForceDirectedEdgeBundler(bisnt.size, 3)
+      val bundler = ForceDirectedEdgeBundler(bisnt.size)
 
       for ((tr, eidx) <- bisnt.zipWithIndex) {
+        bundler.resizeEdge(eidx, 4)
         List(tr.sendID, tr.recvID).map(id => Frame2d.rotate(theta(id))) match {
           case List(sfr, rfr) => {
             bundler(Index2i(eidx, 0)) = sfr xform Pos2d(1.0, 0.0)

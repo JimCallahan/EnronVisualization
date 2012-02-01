@@ -1,7 +1,7 @@
 package org.spiffy.enron
 
 import org.scalagfx.io.Path
-import org.scalagfx.math.{ Pos2d, Index2i, Scalar }
+import org.scalagfx.math.{ Pos2d, Vec2d, Index2i, Scalar, Interval }
 import org.scalagfx.houdini.geo.GeoWriter
 import org.scalagfx.houdini.geo.attr.{ PointFloatAttr, PrimitiveFloatAttr }
 
@@ -22,46 +22,114 @@ object EdgeBundlerApp {
       // Prefix of input XML files
       val prefix = "sentimentLinks"
 
-      // (iterations, converge, radius).
-      val passes = List((50, 0.05, 0.25), (30, 0.025, 0.125))
-
-      val springConst = 5.0
-      val electroConst = 0.02
-      val limits = (0.00001, 0.01)
+      //Attribute names. */
+      val attrNames = Array("litigious", "modalstrong", "negative", "positive", "uncertainty")
+  
+      val passes = 3
+      val iterations = 50
+      val converge = 0.0025
+      val springConst = 6.0
+      val electroConst = 1.0
+      val radius = 0.35
+      val minCompat = 0.0
+      val step = Interval(1E-8, 0.01)
 
       // The number of frames to process.
       val numFrames = 4621
 
       println
-      var iter = 0
-      for (frame <- 1800 until 1801) {
-        val (bundler, sentiment) = readSentimentXML(xmldir, prefix, frame)
+      var icnt = 0
+      //for(attrName <- attrNames) {
+      //for (frame <- 1200 until 4200) {
+      for(attrName <- List("litigious")) {
+        for (frame <- 1800 until 1801) {
+        //  val (bundler, attrs) = readSentimentXML(xmldir, attrName, frame)
+
+        val (bundler, attrs) = {
+          val b = ForceDirectedEdgeBundler(9)
+
+          b.resizeEdge(0, 1)
+          b(Index2i(0, 0)) = Vec2d(-0.9, -0.05).normalized.toPos2d
+          b(Index2i(0, 1)) = Vec2d(0.9, -0.05).normalized.toPos2d
+
+          b.resizeEdge(1, 1)
+          b(Index2i(1, 0)) = Vec2d(-0.9, 0.05).normalized.toPos2d
+          b(Index2i(1, 1)) = Vec2d(0.9, 0.05).normalized.toPos2d
+
+          b.resizeEdge(2, 1)
+          b(Index2i(2, 0)) = Vec2d(-1.0, 1.0).normalized.toPos2d
+          b(Index2i(2, 1)) = Vec2d(-1.0, -1.0).normalized.toPos2d
+
+          b.resizeEdge(3, 1)
+          b(Index2i(3, 0)) = Vec2d(-1.0, 1.0).normalized.toPos2d
+          b(Index2i(3, 1)) = Vec2d(1.0, -1.0).normalized.toPos2d
+
+          b.resizeEdge(4, 1)
+          b(Index2i(4, 0)) = Vec2d(-0.8, 1.0).normalized.toPos2d
+          b(Index2i(4, 1)) = Vec2d(1.0, -1.0).normalized.toPos2d
+
+          b.resizeEdge(5, 1)
+          b(Index2i(5, 0)) = Vec2d(0.8, 0.2).normalized.toPos2d
+          b(Index2i(5, 1)) = Vec2d(0.4, 0.5).normalized.toPos2d
+
+          b.resizeEdge(6, 1)
+          b(Index2i(6, 0)) = Vec2d(0.2, 0.8).normalized.toPos2d
+          b(Index2i(6, 1)) = Vec2d(0.5, 0.4).normalized.toPos2d
+
+          b.resizeEdge(7, 1)
+          b(Index2i(7, 0)) = Vec2d(0.1, 0.7).normalized.toPos2d
+          b(Index2i(7, 1)) = Vec2d(0.4, 0.3).normalized.toPos2d
+
+          b.resizeEdge(8, 1)
+          b(Index2i(8, 0)) = Vec2d(-0.9, 0.15).normalized.toPos2d
+          b(Index2i(8, 1)) = Vec2d(0.9, 0.15).normalized.toPos2d
+
+          (b, Array.fill(b.numEdges)((0.0, 0.0)))
+        }
+        
         println("Solving...")
 
-        var result = subdivPrePass(bundler)
-        //flattenPrePass(result)
+        var result = bundler.retesselate(radius * 0.5)
         result.prepare
-        generateSentimentGeo(geodir, "bundler-prepass", frame, result, sentiment)
+        generateSentimentGeo(geodir, "bundler-prepass", frame, result, attrs)
         generatePrimaryDirDebugGeo(geodir, "bundler-primdirs", frame, result)
         generateMidpointDebugGeo(geodir, "bundler-midpoints", frame, result)
 
-        val (in, ic, ir) = passes.head
-        for (i <- 0 until in) {
-          result.iterate(springConst, electroConst, ir, ic, limits)
-          generateSentimentGeo(geodir, "bundler-iter." + iter, frame, result, sentiment)
-          iter = iter + 1
+        println("------- PASS 1 ---------")
+        println("SpringConst=%.6f ElectroConst=%.6f Radius=%.6f MinCompat=%.6f Converge=%.6f Step=[%.6f,%.6f]"
+          .format(springConst, electroConst, radius, minCompat, converge, step.lower, step.upper))
+
+        for (i <- 0 until iterations) {
+          result.iterate(springConst, electroConst, radius, minCompat, converge, step)
+          generateSentimentGeo(geodir, "bundler-iter." + icnt, frame, result, attrs)
+          icnt = icnt + 1
         }
 
-        for (((n, c, r), pi) <- passes.drop(1).zipWithIndex) {
+        var it = iterations
+        var rd = radius
+        var cv = converge
+        var sp = step
+        for (p <- 2 to passes) {
+          it = (it * 2) / 3
+          rd = rd * 0.5
+          //cv = cv * 0.5
+          sp = Interval(sp.lower, sp.upper * 0.5)
+
+          println("Subdivide")
           result = result.subdivide
-          for (i <- 0 until n) {
-            result.iterate(springConst, electroConst, r, c, limits)
-            generateSentimentGeo(geodir, "bundler-iter." + iter, frame, result, sentiment)
-            iter = iter + 1
+
+          println("------- PASS " + p + " ---------")
+          println("SpringConst=%.6f ElectroConst=%.6f Radius=%.6f MinCompat=%.6f Converge=%.6f Step=[%.6f,%.6f]"
+            .format(springConst, electroConst, rd, minCompat, cv, sp.lower, sp.upper))
+          for (_ <- 0 until it) {
+            result.iterate(springConst, electroConst, rd, minCompat, cv, sp)
+            generateSentimentGeo(geodir, "bundler-iter." + icnt, frame, result, attrs)
+            icnt = icnt + 1
           }
         }
 
         println
+      }
       }
 
       /*
@@ -85,61 +153,27 @@ object EdgeBundlerApp {
     }
   }
 
-  /** */
-  def readSentimentXML(xmldir: Path, prefix: String, frame: Int): (ForceDirectedEdgeBundler, Array[(Array[Double], Array[Double])]) = {
-    val path = xmldir + (prefix + ".%04d.xml".format(frame))
+  /** Read in edges and associated attributes. */
+  def readSentimentXML(xmldir: Path, prefix: String, frame: Int): (ForceDirectedEdgeBundler, Array[(Double, Double)]) = {
+    val path = xmldir + Path(prefix) + (prefix + ".%04d.xml".format(frame))
     println("Reading XML File: " + path)
     val in = new BufferedReader(new FileReader(path.toFile))
     try {
       val elems = XML.load(in)
       val bundler = ForceDirectedEdgeBundler.fromXML(elems)
-      val sentiment =
-        for (bisnt <- (elems \\ "Attributes" \\ "AvgBiSent")) yield {
-          val attrs =
-            for (as <- bisnt \\ "AvgSent") yield {
-              (as \ "@sent", as \ "@words") match {
-                case (s, w) => Array(s.text.toDouble, w.text.toDouble) ++ as.text.trim.split(' ').map(_.toDouble)
-              }
+      val attrs =
+        (elems \\ "Attributes") match {
+          case as =>
+            for (a <- as \\ "Attr") yield {
+              val ary = a.text.trim.split(' ')
+              (ary.head.toDouble, ary.last.toDouble)
             }
-          attrs match { case Seq(a, b) => (a, b) }
         }
-      (bundler, sentiment.toArray)
+
+      (bundler, attrs.toArray)
     }
     finally {
       in.close
-    }
-  }
-
-  def subdivPrePass(bundler: ForceDirectedEdgeBundler): ForceDirectedEdgeBundler = {
-    if (bundler.numSegs != 3)
-      throw new IllegalArgumentException("Only three segment initial edges are supported!")
-    else {
-      val sbundler = ForceDirectedEdgeBundler(bundler.numEdges, 6)
-
-      for (ei <- 0 until bundler.numEdges) {
-        val List(p0, p1, p2, p3) =
-          (for (pi <- 0 to bundler.numSegs) yield { bundler(Index2i(ei, pi)) }).toList
-
-        val s3 = Pos2d.lerp(p1, p2, 0.5)
-        val (s1, s5) = (Pos2d.lerp(p0, p1, 0.5), Pos2d.lerp(p2, p3, 0.5))
-        val (m2, m4) = (Pos2d.lerp(s1, s3, 0.5), Pos2d.lerp(s3, s5, 0.5))
-        val spts = List(p0, s1, Pos2d.lerp(m2, p1, 0.5), s3, Pos2d.lerp(m4, p2, 0.5), s5, p3)
-
-        for ((s, si) <- spts.zipWithIndex) 
-          sbundler(Index2i(ei, si)) = Pos2d.lerp(s, s.toVec2d.normalized.toPos2d, 0.25)
-      }
-
-      sbundler
-    }
-  }
-
-  def flattenPrePass(bundler: ForceDirectedEdgeBundler) = {
-    for (ei <- 0 until bundler.numEdges) {
-      val a = bundler(Index2i(ei, 0))
-      val b = bundler(Index2i(ei, bundler.numSegs))
-      for (i <- 1 until bundler.numSegs) {
-        bundler(Index2i(ei, i)) = Pos2d.lerp(a, b, i.toDouble / bundler.numSegs.toDouble)
-      }
     }
   }
 
@@ -148,48 +182,51 @@ object EdgeBundlerApp {
     * @param prefix The GEO filename prefix.
     * @param frame The number of the frame to generate.
     * @param bundler The source edges.
-    * @param sentimentAttrs The source sentiment attributes.
+    * @param attrs The attributes for each endpoint of th edge.
     */
   def generateSentimentGeo(outdir: Path,
                            prefix: String,
                            frame: Int,
                            bundler: ForceDirectedEdgeBundler,
-                           sentimentAttrs: Array[(Array[Double], Array[Double])]) {
+                           attrs: Array[(Double, Double)]) {
 
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".%04d.geo".format(frame))
     println("Writing GEO File: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
-      val names = List(
-        "sent", "words",
-        "litigious", "modalstrong", "modalweak", "negative", "positive", "uncertainty", "undefined"
-      )
+      val mag = "mag"
+      val pointAttrs = List(PointFloatAttr(mag, 0.0))
+      val primAttrs = List(PrimitiveFloatAttr(mag, 0.0))
 
-      val pointAttrs = names.map(PointFloatAttr(_, 0.0))
-      val primAttrs = names.map(PrimitiveFloatAttr(_, 0.0))
-
-      val numPts = bundler.numEdges * (bundler.numSegs + 1)
+      val numPts = (for (ei <- 0 until bundler.numEdges) yield bundler.edgeSegs(ei) + 1).reduce(_ + _)
       val geo = GeoWriter(numPts, bundler.numEdges, pointAttrs = pointAttrs, primAttrs = primAttrs)
       geo.writeHeader(out)
 
+      var icnt = 0
+      var idxs: List[List[Int]] = List()
+
       geo.writePointAttrs(out)
-      for (((s, r), ei) <- sentimentAttrs.zipWithIndex) {
-        for (pi <- 0 to bundler.numSegs) {
-          val t = pi.toDouble / bundler.numSegs.toDouble
-          for ((name, i) <- names.zipWithIndex)
-            geo.setPointAttr(name, Scalar.lerp(s(i), r(i), t))
+      for (ei <- 0 until bundler.numEdges) {
+        val (s, r) = attrs(ei)
+        val numSegs = bundler.edgeSegs(ei)
+        var eidxs: List[Int] = List()
+        for (pi <- 0 to numSegs) {
+          val t = pi.toDouble / numSegs.toDouble
+          geo.setPointAttr(mag, Scalar.lerp(s, r, t))
           geo.writePoint(out, bundler(Index2i(ei, pi)).toPos3d)
+          eidxs = icnt :: eidxs
+          icnt = icnt + 1
         }
+        idxs = eidxs.reverse :: idxs
       }
+      idxs = idxs.reverse
 
       geo.writePrimAttrs(out)
-      for (((s, r), ei) <- sentimentAttrs.zipWithIndex) {
-        val mx = for ((sa, ra) <- s zip r) yield { sa max ra }
-        for ((name, i) <- names.zipWithIndex)
-          geo.setPrimAttr(name, mx(i))
-        val idxs = for (pi <- 0 to bundler.numSegs) yield { ei * (bundler.numSegs + 1) + pi }
-        geo.writePolyLine(out, idxs.toList)
+      for ((s, r) <- attrs) {
+        geo.setPrimAttr(mag, s max r)
+        geo.writePolyLine(out, idxs.head)
+        idxs = idxs.drop(1)
       }
 
       geo.writeFooter(out)
@@ -256,8 +293,9 @@ object EdgeBundlerApp {
       geo.writeHeader(out)
 
       for (ei <- 0 until bundler.numEdges) {
+        val numSegs = bundler.edgeSegs(ei)
         val a = bundler(Index2i(ei, 0))
-        val b = bundler(Index2i(ei, bundler.numSegs))
+        val b = bundler(Index2i(ei, numSegs))
         val p = Pos2d.lerp(a, b, 0.5)
         geo.writePoint(out, p.toPos3d)
         geo.writePoint(out, bundler.edgeMid(ei).toPos3d)
