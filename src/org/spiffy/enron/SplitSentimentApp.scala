@@ -90,7 +90,7 @@ object SplitSentimentApp {
           //  .format(toLog(topAttrs.last.attr), toLog(topAttrs.head.attr), avg, topAttrs.size))
 
           // Create a single sentiment bundler.
-          val sbundler = ForceDirectedEdgeBundler(topAttrs.size)
+          val sbundler = Bundler(topAttrs.size)
           val sattrs = Array.fill(sbundler.numEdges)((0.0, 0.0))
           for ((adx, ei) <- topAttrs.zipWithIndex) {
             sbundler.resizeEdge(ei, 1)
@@ -118,13 +118,13 @@ object SplitSentimentApp {
   /** */
   def readSentimentXML(xmldir: Path,
                        prefix: String,
-                       frame: Int): (ForceDirectedEdgeBundler, Array[(Array[Double], Array[Double])]) = {
+                       frame: Int): (Bundler, Array[(Array[Double], Array[Double])]) = {
     val path = xmldir + (prefix + ".%04d.xml".format(frame))
     println("Reading XML File: " + path)
     val in = new BufferedReader(new FileReader(path.toFile))
     try {
       val elems = XML.load(in)
-      val bundler = ForceDirectedEdgeBundler.fromXML(elems)
+      val bundler = Bundler.fromXML(elems)
       val sentiment =
         for (bisnt <- (elems \\ "Attributes" \\ "AvgBiSent")) yield {
           val attrs =
@@ -146,7 +146,7 @@ object SplitSentimentApp {
   def writeSentimentXML(xmldir: Path,
                         attrIdx: Int,
                         frame: Int,
-                        bundler: ForceDirectedEdgeBundler,
+                        bundler: Bundler,
                         sentiment: Array[(Double, Double)]) = {
     val path = xmldir + Path(nattrNames(attrIdx)) + (nattrNames(attrIdx) + ".%04d.xml".format(frame))
     println("Writing XML File: " + path)

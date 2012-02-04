@@ -2,7 +2,7 @@ package org.spiffy.enron
 
 import org.scalagfx.math.{ Pos2d, Vec2d, Index2i, Scalar, Interval }
 
-import scala.xml.Elem
+import scala.xml.Node
 import scala.math.{ E, abs, min, max, pow, sqrt }
 import collection.mutable.{ HashMap }
 
@@ -15,7 +15,7 @@ import collection.mutable.{ HashMap }
   * @param numEdges The total number of edges that will be processed.
   * @param original The original base solver (None if this is the original).
   */
-class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[ForceDirectedEdgeBundler]) {
+class Bundler private (val numEdges: Int, original: Option[Bundler]) {
   /** The edge vertices. */
   private val verts: Array[Array[Pos2d]] = Array.fill(numEdges)(null)
 
@@ -53,16 +53,20 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
     val p = this(idx)
     val d = vertexDir(idx)
     val drSq = densityRadius * densityRadius
-    (for (oei <- 0 until numEdges; if (oei != ei)) yield {
-      (for (ovi <- 0 to edgeSegs(oei); if (ovi != vi)) yield {
-        val lenSq = (p - this(Index2i(oei, ovi))).lengthSq
-        if (lenSq > drSq) 0.0
-        else {
-          val wt = (d dot vertexDir(idx))
-          wt * gauss(sqrt(lenSq), densityRadius)
-        }
-      }).reduce(_ + _)
-    }).reduce(_ + _)
+    val ed =
+      for (oei <- 0 until numEdges; if (oei != ei)) yield {
+        val vd =
+          for (ovi <- 0 to edgeSegs(oei); if (ovi != vi)) yield {
+            val lenSq = (p - this(Index2i(oei, ovi))).lengthSq
+            if (lenSq > drSq) 0.0
+            else {
+              val wt = (d dot vertexDir(idx))
+              wt * gauss(sqrt(lenSq), densityRadius)
+            }
+          }
+        if (vd.isEmpty) 0.0 else vd.reduce(_ + _)
+      }
+    if (ed.isEmpty) 0.0 else ed.reduce(_ + _)
   }
 
   /** Normalized Gaussian function which decays to nearly zero at the given radius. */
@@ -244,7 +248,7 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
       forces(ei) = fs
 
       // Spring forces between consecutive vertices.
-      val k = springConst / (edgeLength(ei) / numSegs.toDouble)
+      val k = springConst // / (edgeLength(ei) / numSegs.toDouble)
       for (vi <- 1 until numSegs) {
         val vm = this(Index2i(ei, vi - 1))
         val v = this(Index2i(ei, vi))
@@ -267,10 +271,11 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
               val ov = this(Index2i(oei, ovi))
               val vec = ov - v
               val dist = vec.length
-              if (!step.isBelow(dist) || (dist < radius)) {
+              if ((step.lower < dist) && (dist < radius)) {
                 val eforce = gauss(dist, radius) * electroConst
                 val wt = Scalar.lerp(wtA, wtB, ovi.toDouble / onumSegs.toDouble)
-                fs(vi - 1) = fs(vi - 1) + ((vec / dist) * eforce * compat * wt)
+                val delta = ((vec / dist) * eforce * compat * wt)
+                fs(vi - 1) = fs(vi - 1) + delta
               }
             }
           }
@@ -296,8 +301,8 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
   /** Create a new solver in which all existing edges have been subdivided introducing a new vertex at
     * the midpoint of all existing edge segments.
     */
-  def subdivide: ForceDirectedEdgeBundler = {
-    val rtn = new ForceDirectedEdgeBundler(numEdges, Some(original.getOrElse(this)))
+  def subdivide: Bundler = {
+    val rtn = new Bundler(numEdges, Some(original.getOrElse(this)))
     for (ei <- 0 until numEdges) {
       val numSegs = edgeSegs(ei)
       rtn.resizeEdge(ei, numSegs * 2)
@@ -316,8 +321,8 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
     * positions of its end points at regular intervals so that the resulting segments are no greater than the given
     * length.
     */
-  def retesselate(maxSegLength: Double): ForceDirectedEdgeBundler = {
-    val rtn = new ForceDirectedEdgeBundler(numEdges, original)
+  def retesselate(maxSegLength: Double): Bundler = {
+    val rtn = new Bundler(numEdges, original)
     import scala.math.{ max, floor }
     for (ei <- 0 until numEdges) {
       val a = this(Index2i(ei, 0))
@@ -333,15 +338,15 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
   }
 
   /** Convert to an XML representation. */
-  def toXML: Elem = {
-    <ForceDirectedEdgeBundler numEdges={ numEdges.toString }>{
-      verts.map(e => <Edge>{ e.map(p => <Pos2d>{ "%.6f %.6f".format(p.x, p.y) }</Pos2d>) }</Edge>)
+  def toXML = {
+    <Bundler numEdges={ numEdges.toString }>{
+      verts.map(e => <Edge>{ e.map(p => <Pos2d>{ "%.8f %.8f".format(p.x, p.y) }</Pos2d>) }</Edge>)
     }<Lengths>{
       original match {
         case None =>
         case _ =>
           for (ei <- 0 until numEdges) yield {
-            <Length>{ "%.6f".format(edgeLength(ei)) }</Length>
+            <Length>{ "%.8f".format(edgeLength(ei)) }</Length>
           }
       }
     }</Lengths><Directions>{
@@ -350,7 +355,7 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
         case _ => for (ei <- 0 until numEdges) yield {
           <Dir>{
             val d = edgeDir(ei)
-            "%.6f %.6f".format(d.x, d.y)
+            "%.8f %.8f".format(d.x, d.y)
           }</Dir>
         }
       }
@@ -360,26 +365,25 @@ class ForceDirectedEdgeBundler private (val numEdges: Int, original: Option[Forc
         case _ => for (ei <- 0 until numEdges) yield {
           <Dir>{
             val d = edgeMid(ei)
-            "%.6f %.6f".format(d.x, d.y)
+            "%.8f %.8f".format(d.x, d.y)
           }</Dir>
         }
       }
-    }</MidPoints></ForceDirectedEdgeBundler>
+    }</MidPoints></Bundler>
   }
 }
 
-object ForceDirectedEdgeBundler {
+object Bundler {
   /** Create a new solver.
     * @param numEdges The total number of edges that will be processed.
     */
-  def apply(numEdges: Int) = new ForceDirectedEdgeBundler(numEdges, None)
+  def apply(numEdges: Int) = new Bundler(numEdges, None)
 
   /** Create a new bundler from XML data. */
-  def fromXML(elem: Elem): ForceDirectedEdgeBundler = {
-    val b = elem \\ "ForceDirectedEdgeBundler"
-    val numEdges = (b \ "@numEdges").text.toInt
-    val bundler = ForceDirectedEdgeBundler(numEdges)
-    for ((e, ei) <- (b \\ "Edge").zipWithIndex) {
+  def fromXML(node: Node): Bundler = {
+    val numEdges = (node \ "@numEdges").text.toInt
+    val bundler = Bundler(numEdges)
+    for ((e, ei) <- (node \\ "Edge").zipWithIndex) {
       val verts = e \\ "Pos2d"
       bundler.resizeEdge(ei, verts.size - 1)
       for ((vert, vi) <- verts.zipWithIndex) {

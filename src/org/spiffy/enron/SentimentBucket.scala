@@ -5,6 +5,7 @@ import org.scalagfx.math.Scalar
 
 import collection.mutable.HashMap
 import collection.immutable.{ Queue, SortedSet, TreeMap, TreeSet }
+import collection.parallel.mutable.ParArray
 
 import scala.xml.{ PrettyPrinter, XML }
 import java.io.{ BufferedWriter, FileWriter }
@@ -18,7 +19,7 @@ class SentimentBucket(val firstStamp: Long, val lastStamp: Long, val interval: L
   private var sentiment = new HashMap[Long, Sentiment]
 
   /** Internal storage for sentiment counters: stamp -> senderID -> receiverID -> sentiment */
-  private var table = new HashMap[Long, HashMap[Long, HashMap[Long, Sentiment]]]
+  private val table = new HashMap[Long, HashMap[Long, HashMap[Long, Sentiment]]]
 
   /** Increment the e-mail counters and messageIDs.
     * @param stamp The time stamp of start of period (in UTC milliseconds).
@@ -51,12 +52,9 @@ class SentimentBucket(val firstStamp: Long, val lastStamp: Long, val interval: L
     * For correct results, this should be called after all inc() and addTerms() calls, but before any other methods.
     */
   def collate() {
-    for (stamp <- table.keys) {
-      val sm = table(stamp)
-      for (sendID <- sm.keys) {
-        val rm = sm(sendID)
-        for (recvID <- rm.keys) {
-          val snt = rm(recvID)
+    for ((stamp, sm) <- table.par) {
+      for ((sendID, rm) <- sm) {
+        for ((recvID, snt) <- rm) {
           for (msgID <- messages(stamp)(sendID)(recvID))
             snt += sentiment.getOrElse(msgID, Sentiment())
         }
@@ -102,26 +100,27 @@ class SentimentBucket(val firstStamp: Long, val lastStamp: Long, val interval: L
   }
 
   /** Get the count and sentiment of e-mails sent from one person to another each time period.
-    * @param pid The unique personal identifier (people.personid).
+    * @param sendID The unique personal identifier (people.personid) of the sender.
+    * @param recvID The unique personal identifier (people.personid) of the receiver.
     */
   def sentimentHistory(sendID: Long, recvID: Long): Array[Sentiment] = {
-    val rtn = Array.fill(size)(Sentiment())
-    for (stamp <- table.keySet) {
+    val rtn = ParArray.fill(size)(Sentiment())
+    for ((stamp, sm) <- table.par) {
       val i = intervalIndex(stamp)
-      if (table.contains(stamp)) {
-        val sm = table(stamp)
-        if (sm.contains(sendID)) {
-          val rm = sm(sendID)
-          if (rm.contains(recvID))
-            rtn(i) = rm(recvID)
-        }
+      sm.get(sendID) match {
+        case Some(rm) =>
+          rm.get(recvID) match {
+            case Some(snt) => rtn(i) = snt
+            case _         => 
+          }
+        case _ => 
       }
     }
-    rtn
+    rtn.toArray
   }
 
   /** Get the average amount of e-mails sent from one person to another for each time period.
-    * If the average is zero for a given time period, then the returned Traffic entry will be omitted.
+    * If the average is zero for a given time period, then the returned BiSentiment entry will be omitted.
     * @param window The number of samples to average.
     */
   def averageBiSentiment(window: Int): Array[TreeSet[AverageBiSentiment]] = {
@@ -138,18 +137,19 @@ class SentimentBucket(val firstStamp: Long, val lastStamp: Long, val interval: L
     }
 
     for (bisnt <- totalBiSentiment) {
+      print(".")
       val srHist = sentimentHistory(bisnt.sendID, bisnt.recvID)
       val srAvg =
         (for (ca <- srHist.sliding(window)) yield {
-          (ca zip kern).map { case (a, k) => AverageSentiment(a) * k }.reduce(_ + _)
+          (ca zip kern).map { case (a, k) => AverageSentiment(a, k) }.reduce(_ + _)
         }).toArray
 
       val rsHist = sentimentHistory(bisnt.recvID, bisnt.sendID)
       val rsAvg =
         (for (ca <- rsHist.sliding(window)) yield {
-          (ca zip kern).map { case (a, k) => AverageSentiment(a) * k }.reduce(_ + _)
+          (ca zip kern).map { case (a, k) => AverageSentiment(a, k) }.reduce(_ + _)
         }).toArray
-      
+
       var i = 0
       for ((s, r) <- (srAvg zip rsAvg)) {
         if ((s.words > 0.0) || (r.words > 0.0))
@@ -157,7 +157,7 @@ class SentimentBucket(val firstStamp: Long, val lastStamp: Long, val interval: L
         i = i + 1
       }
     }
-    
+
     rtn
   }
 

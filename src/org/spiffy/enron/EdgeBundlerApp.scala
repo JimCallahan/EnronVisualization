@@ -6,6 +6,8 @@ import org.scalagfx.houdini.geo.GeoWriter
 import org.scalagfx.houdini.geo.attr.{ PointFloatAttr, PrimitiveFloatAttr }
 
 import scala.xml.{ PrettyPrinter, XML }
+import scala.collection.mutable.Queue
+import scala.math.{ E, pow }
 
 import java.io.{ BufferedWriter, BufferedReader, FileWriter, FileReader }
 
@@ -25,107 +27,102 @@ object EdgeBundlerApp {
       //Attribute names. */
       val attrNames = Array("litigious", "modalstrong", "negative", "positive", "uncertainty")
 
-      val passes = 1
+      // Whether to output per-iteration geometry.
+      val debug = true
+      
+      // The size of the bundling time filter.
+      val width = 4
+
+      // Iteration controls.
       val iterations = 60
-      val converge = 0.0025
+      val converge = 0.0025 //* (1.0 / width.toDouble)
       val springConst = 6.0
       val electroConst = 0.15
       val radius = 0.2
-      val minCompat = 0.0
+      val minCompat = 0.1
       val step = Interval(1E-8, 0.01)
-
       val densityRadius = 0.01
 
-      println
-      var icnt = 0
+      // The scaling factor for attribute values for each time sample.
+      val weights = {
+        def f(x: Double) = pow(E, -1.0 * pow(x * 2.0, 2.0))
+        (for (i <- -width to width) yield f(i.toDouble / (width+1).toDouble)).toArray
+      }
+      
+      // The total number of time samples.
+      val window = weights.size
+
+      // The FIFO of time samples.
+      val cache: Queue[(Bundler, Array[(Double, Double)])] = Queue()
+
+      // Bundle it...
       for (attrName <- attrNames) {
-        for (frame <- 1200 until 4200 by 100) {
-          val (bundler, attrs) = readSentimentXML(xmldir, attrName, frame)
+        for (frame <- 2000 until 2090 by 1) {
 
-          /*
-        val (bundler, attrs) = {
-          val b = ForceDirectedEdgeBundler(9)
+          val (bs, as) = readSentimentXML(xmldir, attrName, frame)
+          cache.enqueue((bs.retesselate(radius * 0.5), as))
 
-          b.resizeEdge(0, 1)
-          b(Index2i(0, 0)) = Vec2d(-0.9, -0.05).normalized.toPos2d
-          b(Index2i(0, 1)) = Vec2d(0.9, -0.05).normalized.toPos2d
+          if (cache.size > window)
+            cache.dequeue
 
-          b.resizeEdge(1, 1)
-          b(Index2i(1, 0)) = Vec2d(-0.9, 0.05).normalized.toPos2d
-          b(Index2i(1, 1)) = Vec2d(0.9, 0.05).normalized.toPos2d
+          if (cache.size == window) {
+            val totalEdges = cache.map { case (b, _) => b.numEdges }.reduce(_ + _)
+            val merged = Bundler(totalEdges)
 
-          b.resizeEdge(2, 1)
-          b(Index2i(2, 0)) = Vec2d(-1.0, 1.0).normalized.toPos2d
-          b(Index2i(2, 1)) = Vec2d(-1.0, -1.0).normalized.toPos2d
+            // Merge all edges from the cache together into one bundler.
+            val (firstResultEdge, attrs) = {
+              println("Merging Edges... (" + totalEdges + " Total)")
+              var fre = 0
+              var nre = 0
+              var mei = 0
+              var as: Array[(Double, Double)] = null
+              for (((b, a), i) <- cache.zipWithIndex) {
+                if (i == width) {
+                  fre = mei
+                  as = a
+                }
+                for (ei <- 0 until b.numEdges) {
+                  val numSegs = b.edgeSegs(ei)
+                  merged.resizeEdge(mei, numSegs)
+                  for (vi <- 0 to numSegs)
+                    merged(Index2i(mei, vi)) = b(Index2i(ei, vi))
+                  mei = mei + 1
+                }
+              }
 
-          b.resizeEdge(3, 1)
-          b(Index2i(3, 0)) = Vec2d(-1.0, 1.0).normalized.toPos2d
-          b(Index2i(3, 1)) = Vec2d(1.0, -1.0).normalized.toPos2d
-
-          b.resizeEdge(4, 1)
-          b(Index2i(4, 0)) = Vec2d(-0.8, 1.0).normalized.toPos2d
-          b(Index2i(4, 1)) = Vec2d(1.0, -1.0).normalized.toPos2d
-
-          b.resizeEdge(5, 1)
-          b(Index2i(5, 0)) = Vec2d(0.8, 0.2).normalized.toPos2d
-          b(Index2i(5, 1)) = Vec2d(0.4, 0.5).normalized.toPos2d
-
-          b.resizeEdge(6, 1)
-          b(Index2i(6, 0)) = Vec2d(0.2, 0.8).normalized.toPos2d
-          b(Index2i(6, 1)) = Vec2d(0.5, 0.4).normalized.toPos2d
-
-          b.resizeEdge(7, 1)
-          b(Index2i(7, 0)) = Vec2d(0.1, 0.7).normalized.toPos2d
-          b(Index2i(7, 1)) = Vec2d(0.4, 0.3).normalized.toPos2d
-
-          b.resizeEdge(8, 1)
-          b(Index2i(8, 0)) = Vec2d(-0.9, 0.15).normalized.toPos2d
-          b(Index2i(8, 1)) = Vec2d(0.9, 0.15).normalized.toPos2d
-
-          (b, Array.fill(b.numEdges)((0.0, 0.0)))
-        }
-        */
-
-          var result = bundler.retesselate(radius * 0.5)
-          result.prepare
-          //generateSentimentGeo(geodir, "bundler-prepass", frame, result, attrs, densityRadius)
-          //generatePrimaryDirDebugGeo(geodir, "bundler-primdirs", frame, result)
-          //generateMidpointDebugGeo(geodir, "bundler-midpoints", frame, result)
-
-          //println("------- PASS 1 ---------")
-          //println("SpringConst=%.6f ElectroConst=%.6f Radius=%.6f MinCompat=%.6f Converge=%.6f Step=[%.6f,%.6f]"
-          // .format(springConst, electroConst, radius, minCompat, converge, step.lower, step.upper))
-
-          for (i <- 0 until iterations) {
-            result.iterate(springConst, electroConst, radius, minCompat, Some(attrs), converge, step)
-            //generateSentimentGeo(geodir, "bundler-iter." + icnt, frame, result, attrs, densityRadius)
-            icnt = icnt + 1
-          }
-
-          var it = iterations
-          var rd = radius
-          var cv = converge
-          var sp = step
-          for (p <- 2 to passes) {
-            it = (it * 2) / 3
-            rd = rd * 0.5
-            sp = Interval(sp.lower, sp.upper * 0.5)
-
-            println("Subdivide")
-            result = result.subdivide
-
-            println("------- PASS " + p + " ---------")
-            println("SpringConst=%.6f ElectroConst=%.6f Radius=%.6f MinCompat=%.6f Converge=%.6f Step=[%.6f,%.6f]"
-              .format(springConst, electroConst, rd, minCompat, cv, sp.lower, sp.upper))
-            for (_ <- 0 until it) {
-              result.iterate(springConst, electroConst, rd, minCompat, Some(attrs), cv, sp)
-              generateSentimentGeo(geodir, "bundler-iter." + icnt, frame, result, attrs, densityRadius)
-              icnt = icnt + 1
+              (fre, as)
             }
-          }
 
-          generateSentimentGeo(geodir, "bundler-" + attrName, frame, result, attrs, densityRadius)
-          println
+            // Merge all attribute values, scaling them by the time filter.
+            val mergedAttrs = {
+              println("Merging Attributes...")
+              val ma = Array.fill(totalEdges)((0.0, 0.0))
+              var mei = 0
+              for (((_, a), i) <- cache.zipWithIndex) {
+                val wt = weights(i)
+                for (ei <- 0 until a.size) {
+                  a(ei) match { case (s, r) => ma(mei) = (s * wt, r * wt) }
+                  mei = mei + 1
+                }
+              }
+              ma
+            }
+
+            // Bundle the merged edges together at one time.
+            print("Bundling Edges: ")
+            if(debug) println
+            merged.prepare
+            for (i <- 0 until iterations) {
+              if(debug) generateSentimentGeo(geodir, "bundler-iter." + i + "." + attrName, frame-width, merged, 0, mergedAttrs, densityRadius)
+              merged.iterate(springConst, electroConst, radius, minCompat, Some(mergedAttrs), converge, step)
+              if(!debug) print(".")
+            }
+            if(!debug) println
+
+            // Write out the GEO results.
+            generateSentimentGeo(geodir, "bundler-" + attrName, frame-width, merged, firstResultEdge, attrs, densityRadius)
+            println
+          }
         }
       }
 
@@ -140,13 +137,13 @@ object EdgeBundlerApp {
   }
 
   /** Read in edges and associated attributes. */
-  def readSentimentXML(xmldir: Path, prefix: String, frame: Int): (ForceDirectedEdgeBundler, Array[(Double, Double)]) = {
+  def readSentimentXML(xmldir: Path, prefix: String, frame: Int): (Bundler, Array[(Double, Double)]) = {
     val path = xmldir + Path(prefix) + (prefix + ".%04d.xml".format(frame))
     println("Reading XML File: " + path)
     val in = new BufferedReader(new FileReader(path.toFile))
     try {
       val elems = XML.load(in)
-      val bundler = ForceDirectedEdgeBundler.fromXML(elems)
+      val bundler = Bundler.fromXML(elems)
       val attrs =
         (elems \\ "Attributes") match {
           case as =>
@@ -173,7 +170,8 @@ object EdgeBundlerApp {
   def generateSentimentGeo(outdir: Path,
                            prefix: String,
                            frame: Int,
-                           bundler: ForceDirectedEdgeBundler,
+                           bundler: Bundler,
+                           firstEdge: Int, 
                            attrs: Array[(Double, Double)],
                            densityRadius: Double) {
 
@@ -194,15 +192,16 @@ object EdgeBundlerApp {
       var idxs: List[List[Int]] = List()
 
       geo.writePointAttrs(out)
-      for (ei <- 0 until bundler.numEdges) {
+      for (ei <- 0 until attrs.size) {
         val (s, r) = attrs(ei)
-        val numSegs = bundler.edgeSegs(ei)
+        val numSegs = bundler.edgeSegs(ei+firstEdge)
         var eidxs: List[Int] = List()
         for (pi <- 0 to numSegs) {
           val t = pi.toDouble / numSegs.toDouble
           geo.setPointAttr(mag, Scalar.lerp(s, r, t))
-          geo.setPointAttr(density, bundler.vertexDensity(Index2i(ei, pi), densityRadius))
-          geo.writePoint(out, bundler(Index2i(ei, pi)).toPos3d)
+          val idx = Index2i(ei+firstEdge, pi)
+          geo.setPointAttr(density, bundler.vertexDensity(idx, densityRadius))
+          geo.writePoint(out, bundler(idx).toPos3d)
           eidxs = icnt :: eidxs
           icnt = icnt + 1
         }
@@ -233,7 +232,7 @@ object EdgeBundlerApp {
   def generatePrimaryDirDebugGeo(outdir: Path,
                                  prefix: String,
                                  frame: Int,
-                                 bundler: ForceDirectedEdgeBundler) {
+                                 bundler: Bundler) {
 
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".%04d.geo".format(frame))
@@ -269,7 +268,7 @@ object EdgeBundlerApp {
   def generateMidpointDebugGeo(outdir: Path,
                                prefix: String,
                                frame: Int,
-                               bundler: ForceDirectedEdgeBundler) {
+                               bundler: Bundler) {
 
     import scala.math.{ ceil, log, Pi }
     val path = outdir + (prefix + ".%04d.geo".format(frame))

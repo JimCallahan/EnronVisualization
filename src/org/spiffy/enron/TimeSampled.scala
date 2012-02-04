@@ -10,6 +10,9 @@ trait TimeSampled {
   /** The sampling interval (in milliseconds). */ 
   val interval: Long
 
+  /** The time stamp (UTC milliseconds) of the start of a sample by index. */ 
+  def apply(idx: Int): Long = firstStamp + idx.toLong * interval
+  
   /** Whether the given time stamp is within the valid range. */
   def inRange(stamp: Long) = (firstStamp <= stamp) && (stamp <= lastStamp)
   

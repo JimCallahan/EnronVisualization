@@ -792,7 +792,7 @@ object EnronVizApp {
       }
 
       val bisnt = averages(frame)
-      val bundler = Bundler(bisnt.size)
+      val bundler = ForceDirectedEdgeBundler(bisnt.size)
 
       for ((tr, eidx) <- bisnt.zipWithIndex) {
         bundler.resizeEdge(eidx, 4)
