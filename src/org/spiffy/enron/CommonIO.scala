@@ -87,6 +87,25 @@ trait CommonIO {
     }
   }
 
+  /** Read the bundled edges and associated attributes and personal IDs. */
+  def readBundlerAttrsXML(outdir: Path,
+                         prefix: String,
+                         frame: Int): (Bundler, Array[AttrIndex]) = {
+
+    val path = outdir + (prefix + ".%04d.xml".format(frame))
+    println("Reading XML File: " + path)
+     val in = new BufferedReader(new FileReader(path.toFile))
+    try {
+      val xml = XML.load(in)
+      val bundler = Bundler.fromXML((xml \\ "Bundler").head)
+      val attrs = for (ai <- xml \\ "AttrIndices" \\ "AttrIndex") yield AttrIndex.fromXML(ai)
+      (bundler, attrs.toArray)
+    }
+    finally {
+      in.close
+    }
+  }
+
   //-----------------------------------------------------------------------------------------------------------------------------------
   //   X M L   O U T P U T 
   //-----------------------------------------------------------------------------------------------------------------------------------
@@ -113,6 +132,30 @@ trait CommonIO {
     try {
       val pp = new PrettyPrinter(100, 2)
       out.write(pp.format(<PersonalCentralities>{ central.map(_.toXML) }</PersonalCentralities>))
+    }
+    finally {
+      out.close
+    }
+  }
+
+  /** Write the bundled edges and associated attributes and personal IDs. */
+  def writeBundlerAttrsXML(outdir: Path,
+                           prefix: String,
+                           frame: Int,
+                           bundler: Bundler,
+                           attrIndices: Array[AttrIndex]) {
+
+    val path = outdir + (prefix + ".%04d.xml".format(frame))
+    println("Writing XML File: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
+    try {
+      val xml =
+        <BundlerAttrs>{ bundler.toXML }<AttrIndices>{
+          attrIndices.map(_.toXML)
+        }</AttrIndices></BundlerAttrs>
+
+      val pp = new PrettyPrinter(100, 2)
+      out.write(pp.format(xml))
     }
     finally {
       out.close

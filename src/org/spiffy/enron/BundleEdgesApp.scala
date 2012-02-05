@@ -145,33 +145,6 @@ object BundleEdgesApp
   }
 
   //-----------------------------------------------------------------------------------------------------------------------------------
-  //   X M L   O U T P U T 
-  //-----------------------------------------------------------------------------------------------------------------------------------
-
-  def writeBundlerAttrsXML(outdir: Path,
-                           prefix: String,
-                           frame: Int,
-                           bundler: Bundler,
-                           attrIndices: Array[AttrIndex]) {
-
-    val path = outdir + (prefix + ".%04d.xml".format(frame))
-    println("Writing XML File: " + path)
-    val out = new BufferedWriter(new FileWriter(path.toFile))
-    try {
-      val xml =
-        <BundlerAttrs>{ bundler.toXML }<AttrIndices>{
-          attrIndices.map(_.toXML)
-        }</AttrIndices></BundlerAttrs>
-
-      val pp = new PrettyPrinter(100, 2)
-      out.write(pp.format(xml))
-    }
-    finally {
-      out.close
-    }
-  }
-
-  //-----------------------------------------------------------------------------------------------------------------------------------
   //   G E O    G E N E R A T I O N
   //-----------------------------------------------------------------------------------------------------------------------------------
 

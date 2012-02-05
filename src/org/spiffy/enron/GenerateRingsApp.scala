@@ -39,7 +39,36 @@ object GenerateRingsApp
       generatePersonalLabelsHScript(hsdir, "personalLabels", "PeopleLabels", centrality, people)
       generateArcGeo(geodir, "personalLabelRing", centrality, 1.0, 1.0075, 0.0005)
       generateArcGeo(geodir, "personalLabelSideRing", centrality, 1.0, 1.025, 0.001)
-      generateFirstDerivRings(xmldir, geodir, bundleTerms, centrality)
+
+      var prevTotals = Array.fill(centrality.size)(AverageSentiment())
+      for (frame <- 30 until 1545 by 1) {
+        val (_, _, avgBiSent) = readBundleSentimentSamplesXML(xmldir, "averageBiSentimentSample", frame)
+
+        val totals = {
+          val rtn = Array.fill(centrality.size)(AverageSentiment())
+          val bitotal = HashMap[Long, AverageSentiment]()
+          for ((sid, rm) <- avgBiSent) {
+            for ((rid, snt) <- rm) {
+              bitotal += (sid -> (bitotal.getOrElse(sid, AverageSentiment()) + snt.send))
+              bitotal += (rid -> (bitotal.getOrElse(rid, AverageSentiment()) + snt.recv))
+            }
+          }
+          for ((person, i) <- centrality.zipWithIndex) {
+            val snt = bitotal.getOrElse(person.pid, AverageSentiment())
+            rtn(i) = snt.normalize(bundleTerms.map(snt.freq(_)).reduce(_ + _))
+          }
+          rtn
+        }
+
+        for (term <- bundleTerms) {
+          val dprefix = "deriv-" + term + ".%04d".format(frame)
+          val dattrName = Some(term.toString.toLowerCase + "dt")
+          generateArcGeo(geodir, dprefix, centrality, 1.035, 1.1, 0.001, dattrName,
+            Some((totals zip prevTotals).map { case (a, b) => a.freq(term) - b.freq(term) }))
+        }
+
+        prevTotals = totals
+      }
 
       println
       println("ALL DONE!")
@@ -48,47 +77,6 @@ object GenerateRingsApp
       case ex =>
         println("Uncaught Exception: " + ex + "\n" +
           "Stack Trace:\n" + ex.getStackTraceString)
-    }
-  }
-
-  /** Create the ring geometry for the first dervatives of each sentiment per person.
-    * @param xmldir The directory from which to read XML format files.
-    * @param geodir The directory to write Houdini GEO format files.
-    * @param bundleTerms The financial terms we are interested in bundling.
-    * @param centrality The eigenvector centrality of the people.
-    */
-  def generateFirstDerivRings(xmldir: Path,
-                              geodir: Path,
-                              bundleTerms: Array[FinancialTerm.Value],
-                              centrality: TreeSet[PersonalCentrality]) = {
-    var prevTotals = Array.fill(centrality.size)(AverageSentiment())
-    for (frame <- 30 until 1545 by 1) {
-      val (_, _, avgBiSent) = readBundleSentimentSamplesXML(xmldir, "averageBiSentimentSample", frame)
-
-      val totals = {
-        val rtn = Array.fill(centrality.size)(AverageSentiment())
-        val bitotal = HashMap[Long, AverageSentiment]()
-        for ((sid, rm) <- avgBiSent) {
-          for ((rid, snt) <- rm) {
-            bitotal += (sid -> (bitotal.getOrElse(sid, AverageSentiment()) + snt.send))
-            bitotal += (rid -> (bitotal.getOrElse(rid, AverageSentiment()) + snt.recv))
-          }
-        }
-        for ((person, i) <- centrality.zipWithIndex) {
-          val snt = bitotal.getOrElse(person.pid, AverageSentiment())
-          rtn(i) = snt.normalize(bundleTerms.map(snt.freq(_)).reduce(_ + _))
-        }
-        rtn
-      }
-
-      for (term <- bundleTerms) {
-        val dprefix = "deriv-" + term + ".%04d".format(frame)
-        val dattrName = Some(term.toString.toLowerCase + "dt")
-        generateArcGeo(geodir, dprefix, centrality, 1.035, 1.1, 0.001, dattrName,
-          Some((totals zip prevTotals).map { case (a, b) => a.freq(term) - b.freq(term) }))
-      }
-
-      prevTotals = totals
     }
   }
 
@@ -166,79 +154,6 @@ object GenerateRingsApp
           case _                    =>
         }
         geo.writeTriangle(out, vis)
-      }
-
-      geo.writeFooter(out)
-    }
-    finally {
-      out.close
-    }
-  }
-
-  /** Generate polygonal lines in Houdini GEO format for e-mail activity and sentiment between people.
-    * @param outdir Path to the directory where the GEO files are written.
-    * @param prefix The GEO filename prefix.
-    * @param frame The number of the frame to generate.
-    * @param bundler The source edges.
-    * @param attrs The attributes for each end point of the edge.
-    */
-  def generateBundleGeo(outdir: Path,
-                        prefix: String,
-                        frame: Int,
-                        bundler: Bundler,
-                        attrs: Array[(Double, Double)],
-                        densityRadius: Double) {
-
-    import scala.math.{ ceil, log, Pi }
-    val path = outdir + (prefix + ".%04d.geo".format(frame))
-    println("  Writing: " + path)
-    val out = new BufferedWriter(new FileWriter(path.toFile))
-    try {
-      val names @ List(mag, density) = List("mag", "density")
-      val pointAttrs = names.map(PointFloatAttr(_, 0.0))
-      val primAttrs = names.map(PrimitiveFloatAttr(_, 0.0))
-
-      val numPts = (for (ei <- 0 until bundler.numEdges) yield bundler.edgeSegs(ei) + 3).reduce(_ + _)
-      val geo = GeoWriter(numPts, bundler.numEdges, pointAttrs = pointAttrs, primAttrs = primAttrs)
-      geo.writeHeader(out)
-
-      var icnt = 0
-      var idxs: List[List[Int]] = List()
-      val edgeDensity = Array.fill(attrs.size)(0.0)
-
-      val shrink = 0.925
-
-      geo.writePointAttrs(out)
-      for (ei <- 0 until attrs.size) {
-        val (s, r) = attrs(ei)
-        val numSegs = bundler.edgeSegs(ei)
-        var eidxs: List[Int] = List()
-        for (ppi <- -1 to numSegs + 1) {
-          val pi = Scalar.clamp(ppi, 0, numSegs)
-          val t = pi.toDouble / numSegs.toDouble
-          geo.setPointAttr(mag, Scalar.lerp(s, r, t))
-          val idx = Index2i(ei, pi)
-          val d = bundler.vertexDensity(idx, densityRadius)
-          edgeDensity(ei) = edgeDensity(ei) + d
-          geo.setPointAttr(density, d)
-          val pp = bundler(idx)
-          val p = if ((ppi == -1) || (ppi == numSegs + 1)) pp else pp * shrink
-          geo.writePoint(out, p.toPos3d)
-          eidxs = icnt :: eidxs
-          icnt = icnt + 1
-        }
-        edgeDensity(ei) = edgeDensity(ei) / numSegs.toDouble
-        idxs = eidxs.reverse :: idxs
-      }
-      idxs = idxs.reverse
-
-      geo.writePrimAttrs(out)
-      for (ei <- 0 until attrs.size) {
-        val (s, r) = attrs(ei)
-        geo.setPrimAttr(mag, s + r)
-        geo.setPrimAttr(density, edgeDensity(ei))
-        geo.writePolyLine(out, idxs.head)
-        idxs = idxs.drop(1)
       }
 
       geo.writeFooter(out)
