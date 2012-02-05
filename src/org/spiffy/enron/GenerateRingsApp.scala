@@ -14,7 +14,7 @@ import java.io.{ BufferedWriter, BufferedReader, FileWriter, FileReader, IOExcep
 
 import scala.xml.{ Node, XML }
 
-object InterpEdgesApp
+object GenerateRingsApp
   extends CommonIO {
 
   /** Top level method. */
@@ -29,15 +29,9 @@ object InterpEdgesApp
       // The directory from which to read XML format files.
       val xmldir = Path("./data/xml")
 
-      // The financial terms we are interested in bundling. */
+      // The financial terms we are interested in bundling. 
       import FinancialTerm._
       val bundleTerms = Array(Litigious, ModalStrong, Negative, Positive, Uncertainty)
-
-      // Whether to output per-iteration geometry.
-      val debug = false
-
-      // Radius used to compute "density" GEO attribute.
-      val densityRadius = 0.01
 
       println("Generating Per-Person Ring Geometry...")
       val centrality = readMostCentralXML
@@ -45,40 +39,7 @@ object InterpEdgesApp
       generatePersonalLabelsHScript(hsdir, "personalLabels", "PeopleLabels", centrality, people)
       generateArcGeo(geodir, "personalLabelRing", centrality, 1.0, 1.0075, 0.0005)
       generateArcGeo(geodir, "personalLabelSideRing", centrality, 1.0, 1.025, 0.001)
-
-      // Bundle it...
-      var prevTotals = Array.fill(centrality.size)(AverageSentiment())
-      for (frame <- 30 until 1545 by 1) {
-        val (_, _, avgBiSent) = readBundleSentimentSamplesXML(xmldir, "averageBiSentimentSample", frame)
-
-        val totals = {
-          val rtn = Array.fill(centrality.size)(AverageSentiment())
-          val bitotal = HashMap[Long, AverageSentiment]()
-          for ((sid, rm) <- avgBiSent) {
-            for ((rid, snt) <- rm) {
-              bitotal += (sid -> (bitotal.getOrElse(sid, AverageSentiment()) + snt.send))
-              bitotal += (rid -> (bitotal.getOrElse(rid, AverageSentiment()) + snt.recv))
-            }
-          }
-          for ((person, i) <- centrality.zipWithIndex) {
-            val snt = bitotal.getOrElse(person.pid, AverageSentiment())
-            rtn(i) = snt.normalize(bundleTerms.map(snt.freq(_)).reduce(_ + _))
-          }
-          rtn
-        }
-
-        for (term <- bundleTerms) {
-          val dprefix = "deriv-" + term + ".%04d".format(frame)
-          val dattrName = Some(term.toString.toLowerCase + "dt")
-          generateArcGeo(geodir, dprefix, centrality, 1.035, 1.1, 0.001, dattrName, 
-        		  Some((totals zip prevTotals).map{ case (a, b) => a.freq(term) - b.freq(term) }))
-            
-            
-            
-        }
-
-        prevTotals = totals
-      }
+      generateFirstDerivRings(xmldir, geodir, bundleTerms, centrality)
 
       println
       println("ALL DONE!")
@@ -90,6 +51,47 @@ object InterpEdgesApp
     }
   }
 
+  /** Create the ring geometry for the first dervatives of each sentiment per person.
+    * @param xmldir The directory from which to read XML format files.
+    * @param geodir The directory to write Houdini GEO format files.
+    * @param bundleTerms The financial terms we are interested in bundling.
+    * @param centrality The eigenvector centrality of the people.
+    */
+  def generateFirstDerivRings(xmldir: Path,
+                              geodir: Path,
+                              bundleTerms: Array[FinancialTerm.Value],
+                              centrality: TreeSet[PersonalCentrality]) = {
+    var prevTotals = Array.fill(centrality.size)(AverageSentiment())
+    for (frame <- 30 until 1545 by 1) {
+      val (_, _, avgBiSent) = readBundleSentimentSamplesXML(xmldir, "averageBiSentimentSample", frame)
+
+      val totals = {
+        val rtn = Array.fill(centrality.size)(AverageSentiment())
+        val bitotal = HashMap[Long, AverageSentiment]()
+        for ((sid, rm) <- avgBiSent) {
+          for ((rid, snt) <- rm) {
+            bitotal += (sid -> (bitotal.getOrElse(sid, AverageSentiment()) + snt.send))
+            bitotal += (rid -> (bitotal.getOrElse(rid, AverageSentiment()) + snt.recv))
+          }
+        }
+        for ((person, i) <- centrality.zipWithIndex) {
+          val snt = bitotal.getOrElse(person.pid, AverageSentiment())
+          rtn(i) = snt.normalize(bundleTerms.map(snt.freq(_)).reduce(_ + _))
+        }
+        rtn
+      }
+
+      for (term <- bundleTerms) {
+        val dprefix = "deriv-" + term + ".%04d".format(frame)
+        val dattrName = Some(term.toString.toLowerCase + "dt")
+        generateArcGeo(geodir, dprefix, centrality, 1.035, 1.1, 0.001, dattrName,
+          Some((totals zip prevTotals).map { case (a, b) => a.freq(term) - b.freq(term) }))
+      }
+
+      prevTotals = totals
+    }
+  }
+
   //-----------------------------------------------------------------------------------------------------------------------------------
   //   G E O    G E N E R A T I O N
   //-----------------------------------------------------------------------------------------------------------------------------------
@@ -97,7 +99,7 @@ object InterpEdgesApp
   /** Generate circular ring segments for each person based on their level of centrality.
     * @param outdir Path to the directory where the GEO files are written.
     * @param prefix The GEO filename prefix.
-    * @param centrality The eigenvector centrality of the people to graph sorted by score.
+    * @param centrality The eigenvector centrality of the people.
     * @param innerRadius The radius to the inner most edge of the generated arcs.
     * @param outerRadius The radius to the outer most edge of the generated arcs.
     * @param gap The gap between ring segments in fraction of total radius.
@@ -253,7 +255,7 @@ object InterpEdgesApp
   /** Generate a label in Houdini HScript format for each person around the circular graph.
     * @param outdir Path to the directory where the HScript files are written.
     * @param sopName The name of the Geometry SOP to create to hold the labels.
-    * @param centrality The eigenvector centrality of the people to graph sorted by score.
+    * @param centrality The eigenvector centrality of the people.
     * @param people The names of people indexed by unique personal identifier.
     */
   def generatePersonalLabelsHScript(outdir: Path,
