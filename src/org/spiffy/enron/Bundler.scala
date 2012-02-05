@@ -2,7 +2,7 @@ package org.spiffy.enron
 
 import org.scalagfx.math.{ Pos2d, Vec2d, Index2i, Scalar, Interval }
 
-import scala.xml.Node
+import scala.xml.{ Elem, Node }
 import scala.math.{ E, abs, min, max, pow, sqrt }
 import collection.mutable.{ HashMap }
 
@@ -337,40 +337,11 @@ class Bundler private (val numEdges: Int, original: Option[Bundler]) {
     rtn
   }
 
-  /** Convert to an XML representation. */
-  def toXML = {
+  /** Convert to a minimal XML representation. */
+  def toXML = 
     <Bundler numEdges={ numEdges.toString }>{
       verts.map(e => <Edge>{ e.map(p => <Pos2d>{ "%.8f %.8f".format(p.x, p.y) }</Pos2d>) }</Edge>)
-    }<Lengths>{
-      original match {
-        case None =>
-        case _ =>
-          for (ei <- 0 until numEdges) yield {
-            <Length>{ "%.8f".format(edgeLength(ei)) }</Length>
-          }
-      }
-    }</Lengths><Directions>{
-      original match {
-        case None =>
-        case _ => for (ei <- 0 until numEdges) yield {
-          <Dir>{
-            val d = edgeDir(ei)
-            "%.8f %.8f".format(d.x, d.y)
-          }</Dir>
-        }
-      }
-    }</Directions><MidPoints>{
-      original match {
-        case None =>
-        case _ => for (ei <- 0 until numEdges) yield {
-          <Dir>{
-            val d = edgeMid(ei)
-            "%.8f %.8f".format(d.x, d.y)
-          }</Dir>
-        }
-      }
-    }</MidPoints></Bundler>
-  }
+    }</Bundler>
 }
 
 object Bundler {

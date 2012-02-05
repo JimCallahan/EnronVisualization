@@ -6,40 +6,25 @@ import org.scalagfx.houdini.geo.GeoWriter
 import org.scalagfx.houdini.geo.attr.{ PointFloatAttr, PrimitiveFloatAttr }
 
 import scala.xml.{ PrettyPrinter, XML }
-import scala.collection.immutable.{ TreeSet }
+import scala.collection.immutable.{ TreeSet, TreeMap }
 import scala.collection.mutable.{ HashMap, HashSet }
 import scala.math.{ E, pow, log }
 
 import java.io.{ BufferedWriter, BufferedReader, FileWriter, FileReader, IOException }
 
-object BundleEdgesApp {
+import scala.xml.{ Node, XML }
 
-  /** An sortable attribute value and associated sender/receiver IDs. */
-  class AttrIndex private (val sendID: Long, val recvID: Long, val sendAttr: Double, val recvAttr: Double)
-    extends Ordered[AttrIndex] {
-    /** Ordered in decreasing attribute value and increasing send/recv IDs. */
-    def compare(that: AttrIndex): Int =
-      (that.total compare total) match {
-        case 0 => (sendID compare that.sendID) match {
-          case 0  => recvID compare that.recvID
-          case c2 => c2
-        }
-        case c => c
-      }
-
-    def total = sendAttr + recvAttr
-  }
-
-  object AttrIndex {
-    def apply(sendID: Long, recvID: Long, sendAttr: Double, recvAttr: Double) =
-      new AttrIndex(sendID, recvID, sendAttr, recvAttr)
-  }
+object BundleEdgesApp
+  extends CommonIO {
 
   /** Top level method. */
   def main(args: Array[String]) {
     try {
       // The directory to write Houdini GEO format files.
       val geodir = Path("./artwork/houdini/geo/interpBundles")
+
+      // The directory to write Houdini HScript format files.
+      val hsdir = Path("./artwork/houdini/hscript")
 
       // The directory from which to read XML format files.
       val xmldir = Path("./data/xml")
@@ -53,6 +38,7 @@ object BundleEdgesApp {
 
       // Iteration controls.
       val iterations = 300
+      val maxEdges = 30
       val converge = 0.05
       val springConst = 7.0
       val electroConst = 0.35
@@ -65,16 +51,14 @@ object BundleEdgesApp {
       val centrality = readMostCentralXML
 
       // Bundle it...
-      for (term <- bundleTerms) {
+      for (frame <- 30 until 1545 by 15) {
         println
-        println("Processing " + term + " Bundles...")
-        for (frame <- 30 until 1545 by 15) {
-
-          val (stamp, interval, avgBiSent) = readBundleSentimentSamplesXML(xmldir, frame)
-          val attrIndices = extractAttrs(term, bundleTerms, avgBiSent)
+        println("------ Frame " + frame + " ------")
+        for (term <- bundleTerms) {
+          val (stamp, interval, avgBiSent) = readBundleSentimentSamplesXML(xmldir, "bundleSentimentSample", frame)
+          val attrIndices = extractAttrs(maxEdges, term, bundleTerms, avgBiSent)
           if (!attrIndices.isEmpty) {
             val bundler = buildBundler(centrality, avgBiSent, attrIndices, radius)
-
             val attrs = attrIndices.map(ai => (ai.sendAttr, ai.recvAttr))
 
             bundler.prepare
@@ -82,9 +66,8 @@ object BundleEdgesApp {
               if (debug) generateBundleGeo(geodir, "iter." + i + "." + term, frame, bundler, attrs, densityRadius)
               bundler.iterate(springConst, electroConst, radius, minCompat, Some(attrs), converge, step)
             }
-            if (!debug) println
 
-            // Write out the GEO results.
+            writeBundlerAttrsXML(xmldir + "bundledEdges", "bundledEdges-" + term, frame, bundler, attrIndices)
             generateBundleGeo(geodir, "bundled-" + term, frame, bundler, attrs, densityRadius)
             println
           }
@@ -140,14 +123,14 @@ object BundleEdgesApp {
   /** Extract and normalize the attributes for a specific FinancialTerm with the biggest magnitude
     * for use in bundling and rendering.
     */
-  def extractAttrs(term: FinancialTerm.Value,
+  def extractAttrs(maxEdges: Int,
+                   term: FinancialTerm.Value,
                    bundleTerms: Array[FinancialTerm.Value],
                    avgBiSent: HashMap[Long, HashMap[Long, AverageBiSentiment]]): Array[AttrIndex] = {
 
     def f(snt: AverageSentiment): Double =
       snt.freq(term) / bundleTerms.map(snt.freq(_)).reduce(_ + _)
 
-    val numEdges = avgBiSent.map { case (_, rm) => rm.size }.reduce(_ + _)
     var rtn = TreeSet[AttrIndex]()
     for ((sid, rm) <- avgBiSent) {
       for ((rid, bisnt) <- rm) {
@@ -158,59 +141,33 @@ object BundleEdgesApp {
       }
     }
 
-    rtn.take(rtn.size / 5).toArray
+    rtn.take(maxEdges).toArray
   }
 
   //-----------------------------------------------------------------------------------------------------------------------------------
-  //   X M L   I N P U T 
+  //   X M L   O U T P U T 
   //-----------------------------------------------------------------------------------------------------------------------------------
 
-  /** Read the most central (eigenvector centrality) people. */
-  def readMostCentralXML: TreeSet[PersonalCentrality] = {
-    val path = Path("./data/xml/mostCentral.csv")
-    println("  Reading: " + path)
-    val in = new BufferedReader(new FileReader(path.toFile))
+  def writeBundlerAttrsXML(outdir: Path,
+                           prefix: String,
+                           frame: Int,
+                           bundler: Bundler,
+                           attrIndices: Array[AttrIndex]) {
+
+    val path = outdir + (prefix + ".%04d.xml".format(frame))
+    println("Writing XML File: " + path)
+    val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
-      val xml = XML.load(in)
-      var central = TreeSet[PersonalCentrality]()
-      for (pc <- xml \\ "PersonalCentrality")
-        central = central + PersonalCentrality.fromXML(pc)
-      central
+      val xml =
+        <BundlerAttrs>{ bundler.toXML }<AttrIndices>{
+          attrIndices.map(_.toXML)
+        }</AttrIndices></BundlerAttrs>
+
+      val pp = new PrettyPrinter(100, 2)
+      out.write(pp.format(xml))
     }
     finally {
-      in.close
-    }
-  }
-
-  /** Read in edges and associated attributes.
-    * @return (Time Stamp, Interval, Samples)
-    */
-  def readBundleSentimentSamplesXML(xmldir: Path, frame: Int): (Long, Long, HashMap[Long, HashMap[Long, AverageBiSentiment]]) = {
-    //val prefix = "bundleSentimentSample"
-    val prefix = "averageBiSentimentSample"
-    val path = xmldir + Path(prefix) + (prefix + ".%04d.xml".format(frame))
-    println("Reading XML File: " + path)
-    val in = new BufferedReader(new FileReader(path.toFile))
-    try {
-      val xml = XML.load(in)
-
-      val xframe = (xml \\ "Frame").text.toInt
-      if (frame != xframe) throw new IOException("Wrong input frame!")
-      else {
-        val stamp = (xml \\ "TimeStamp").text.toLong
-        val interval = (xml \\ "Interval").text.toLong
-        val rtn = HashMap[Long, HashMap[Long, AverageBiSentiment]]()
-        for (s <- xml \\ "AvgBiSent") {
-          val snt = AverageBiSentiment.fromXML(s)
-          val sm = rtn.getOrElseUpdate(snt.sendID, HashMap[Long, AverageBiSentiment]())
-          sm += (snt.recvID -> snt)
-        }
-
-        (stamp, interval, rtn)
-      }
-    }
-    finally {
-      in.close
+      out.close
     }
   }
 
@@ -365,4 +322,5 @@ object BundleEdgesApp {
       out.close
     }
   }
+
 }

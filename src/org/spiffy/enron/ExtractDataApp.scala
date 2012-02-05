@@ -13,7 +13,8 @@ import java.sql.{ Connection, DriverManager, ResultSet, SQLException, Timestamp 
 import java.util.{ Calendar, Date, GregorianCalendar }
 import java.io.{ BufferedWriter, BufferedReader, FileWriter, FileReader }
 
-object ExtractDataApp {
+object ExtractDataApp
+  extends CommonIO {
 
   // Loads the JDBC driver. 
   classOf[com.mysql.jdbc.Driver]
@@ -260,34 +261,6 @@ object ExtractDataApp {
   //   X M L   O U T P U T 
   //-----------------------------------------------------------------------------------------------------------------------------------
 
-  /** Write the list of validated people. */
-  def writePeopleXML(ps: TreeMap[Long, Person]) {
-    val path = Path("./data/xml/people.xml")
-    println("  Writing: " + path)
-    val out = new BufferedWriter(new FileWriter(path.toFile))
-    try {
-      val pp = new PrettyPrinter(100, 2)
-      out.write(pp.format(<People>{ ps.values.map(_.toXML) }</People>))
-    }
-    finally {
-      out.close
-    }
-  }
-
-  /** Write the most central (eigenvector centrality) people. */
-  def writeMostCentralXML(central: TreeSet[PersonalCentrality]) {
-    val path = Path("./data/xml/mostCentral.xml")
-    println("  Writing: " + path)
-    val out = new BufferedWriter(new FileWriter(path.toFile))
-    try {
-      val pp = new PrettyPrinter(100, 2)
-      out.write(pp.format(<PersonalCentralities>{ central.map(_.toXML) }</PersonalCentralities>))
-    }
-    finally {
-      out.close
-    }
-  }
-
   /** Write the total e-mails sent each month. */
   def writeMonthlyTotalsXML(perMonth: TreeMap[Long, Long]) {
     val path = Path("./data/xml/monthlyTotals.xml")
@@ -320,10 +293,10 @@ object ExtractDataApp {
                                        avgSents: Array[TreeSet[AverageBiSentiment]]) {
     val numFrames = avgSents.size
     def toFrame(i: Int) = i + filterWidth
-    
+
     val prefix = "averageBiSentimentSample"
     val dir = xmldir + prefix
-        
+
     println
     println("Generating AverageBiSentiment Sample XML...")
     println("  XML Files: " + (dir + prefix) + ".%04d-%04d.xml".format(toFrame(0), toFrame(numFrames) - 1))
@@ -365,10 +338,10 @@ object ExtractDataApp {
     def toFrame(i: Int) = i + filterWidth
     val startIdx = filterWidth
     val lastIdx = startIdx + ((numFrames / filterWidth) - 2) * filterWidth
-    
+
     val prefix = "bundleSentimentSample"
     val dir = xmldir + prefix
-    
+
     println
     println("Generating Bundle AverageBiSentiment Sample XML...")
     println("  XML Files: " + (dir + prefix) +
