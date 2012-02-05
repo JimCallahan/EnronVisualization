@@ -16,6 +16,16 @@ class AverageSentiment private (val sent: Double, val words: Double, terms: Arra
     new AverageSentiment(sent + that.sent, words + that.words, ts)
   }
 
+  /** Normalize all terms by dividing them by the given total. */
+  def normalize(total: Double): AverageSentiment = {
+    if (total != 0.0) {
+      for (i <- 0 until terms.size) {
+        terms(i) = terms(i) / total
+      }
+    }
+    this
+  }
+
   /** Get the frequency with which a word in a particular FinancialTerm category was mentioned. */
   def freq(term: FinancialTerm.Value) = terms(term.id)
 
