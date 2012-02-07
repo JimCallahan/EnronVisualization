@@ -10,8 +10,13 @@ import scala.xml.Node
 class PersonalCentrality private (val pid: Long, val score: Double)
   extends PersonalIdentified
   with Ordered[PersonalCentrality] {
-  /** Ordered by ascending personal IDs. */
-  def compare(that: PersonalCentrality): Int = pid compare that.pid
+  /** Ordered by descending centrality score and ascending personal ID. */
+  def compare(that: PersonalCentrality): Int = {
+    (that.score compare score) match {
+      case 0 => pid compare that.pid
+      case s => s 
+    }
+  }
 
   /** Log space score. */
   def normScore = scala.math.log(100.0 * score)

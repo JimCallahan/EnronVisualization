@@ -34,7 +34,7 @@ object ExtractDataApp
 
         println("Determining the Active Interval...")
         val samples = {
-          val interval = 12 * 60 * 60 * 1000 // 12-hours
+          val interval = 6 * 60 * 60 * 1000 // 6-hours
           val threshold = 10000
           val mt = collectActiveMonths(conn, threshold)
           writeMonthlyTotalsXML(mt)
@@ -42,7 +42,7 @@ object ExtractDataApp
         }
 
         // The sampling window (in frames).
-        val filterWidth = 15
+        val filterWidth = 60
         val window = filterWidth * 2 + 1
 
         println
@@ -62,9 +62,10 @@ object ExtractDataApp
         println
         print("Averaging Sentiment: ")
         val avgBiSentSamples = bucket.averageBiSentiment(window)
+        
         println
-        writeAvergeBiSentimentSamplesXML(xmldir, samples, filterWidth, avgBiSentSamples)
-        writeBundleSentimentSamplesXML(xmldir, samples, filterWidth, avgBiSentSamples)
+        val prefix = "samples6h60fw" 
+        writeAvergeBiSentimentSamplesXML(xmldir, prefix, samples, filterWidth, avgBiSentSamples)
 
         println
         println("ALL DONE!")
@@ -288,13 +289,13 @@ object ExtractDataApp
     * @param avgSents:
     */
   def writeAvergeBiSentimentSamplesXML(xmldir: Path,
+                                       prefix: String,
                                        samples: Samples,
                                        filterWidth: Int,
                                        avgSents: Array[TreeSet[AverageBiSentiment]]) {
     val numFrames = avgSents.size
     def toFrame(i: Int) = i + filterWidth
 
-    val prefix = "averageBiSentimentSample"
     val dir = xmldir + prefix
 
     println
@@ -311,7 +312,7 @@ object ExtractDataApp
             <Frame>{ frame }</Frame>
             <TimeStamp>{ samples(frame) }</TimeStamp>
             <Interval>{ samples.interval }</Interval>
-            <AvgBiSents>{ avgSents(i).map(_.toXML) }</AvgBiSents>
+            <AvgBiSents>{ avgSents(i).toList.map(_.toXML) }</AvgBiSents>
           </AverageBiSentimentSample>
 
         val pp = new PrettyPrinter(100, 2)

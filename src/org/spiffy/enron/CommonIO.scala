@@ -20,17 +20,16 @@ trait CommonIO {
   //-----------------------------------------------------------------------------------------------------------------------------------
 
   /** Write the list of validated people, returning central ones only. */
-  def readPeopleXML(central: TreeSet[PersonalCentrality]): TreeMap[Long, Person] = {
+  def readPeopleXML(central: TreeMap[Long,PersonalCentrality]): TreeMap[Long, Person] = {
     val path = Path("./data/xml/people.xml")
     println("  Reading: " + path)
     val in = new BufferedReader(new FileReader(path.toFile))
     try {
       val xml = XML.load(in)
-      val centralIDs = central.map(_.pid)
       var people = TreeMap[Long, Person]()
       for (pc <- xml \\ "Person") {
         val person = Person.fromXML(pc)
-        if (centralIDs.contains(person.pid))
+        if (central.contains(person.pid))
           people = people + (person.pid -> person)
       }
       people
@@ -41,15 +40,17 @@ trait CommonIO {
   }
 
   /** Read the most central (eigenvector centrality) people. */
-  def readMostCentralXML: TreeSet[PersonalCentrality] = {
+  def readMostCentralXML: TreeMap[Long,PersonalCentrality] = {
     val path = Path("./data/xml/mostCentral.xml")
     println("  Reading: " + path)
     val in = new BufferedReader(new FileReader(path.toFile))
     try {
       val xml = XML.load(in)
-      var central = TreeSet[PersonalCentrality]()
-      for (pc <- xml \\ "PersonalCentrality")
-        central = central + PersonalCentrality.fromXML(pc)
+      var central = TreeMap[Long,PersonalCentrality]()
+      for (pc <- xml \\ "PersonalCentrality") {
+        val person = PersonalCentrality.fromXML(pc)
+        central = central + (person.pid -> person)
+      }
       central
     }
     finally {
@@ -131,7 +132,7 @@ trait CommonIO {
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
       val pp = new PrettyPrinter(100, 2)
-      out.write(pp.format(<PersonalCentralities>{ central.map(_.toXML) }</PersonalCentralities>))
+      out.write(pp.format(<PersonalCentralities>{ central.toList.map(_.toXML) }</PersonalCentralities>))
     }
     finally {
       out.close

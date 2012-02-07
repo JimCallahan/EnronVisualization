@@ -7,19 +7,19 @@ import org.scalagfx.houdini.geo.attr.{ PointFloatAttr, PrimitiveFloatAttr }
 
 import scala.xml.{ PrettyPrinter, XML }
 import scala.collection.immutable.{ TreeSet, TreeMap }
-import scala.collection.mutable.{ HashMap, HashSet }
+import scala.collection.mutable.{ HashMap, HashSet, Queue }
 import scala.math.{ E, pow, log }
 
 import java.io.{ BufferedWriter, BufferedReader, FileWriter, FileReader, IOException }
 
 import scala.xml.{ Node, XML }
 
-object BundleEdgesApp
+object SmoothEdgesApp
   extends CommonIO {
 
   /** Top level method. */
   def main(args: Array[String]) {
-    try {      
+    try {
       // Prefix for the family of files read and written.
       val prefix = "samples6h60fw"
 
@@ -30,56 +30,77 @@ object BundleEdgesApp
       val hsdir = Path("./artwork/houdini/hscript")
 
       // The directory from which to read XML format files.
-      val xmldir = Path("./data/xml")
+      val xmldir = Path("./data/xml") 
 
       // The financial terms we are interested in bundling. */
       import FinancialTerm._
       val bundleTerms = Array(Litigious, Negative, Positive, Uncertainty)
 
-      // Whether to output per-iteration geometry.
-      val debug = false
-      
-      // Whether to output per-frame bundled geometry.
-      val genGeo = true
-
       // The sampling window (in frames).
       val filterWidth = 30
       val window = filterWidth * 2 + 1
-        
-      // Iteration controls.
-      val iterations = 150
-      val maxEdges = 50
-      val converge = 0.01
-      val springConst = 7.0
-      val electroConst = 0.35
-      val radius = 0.2
-      val minCompat = 0.1
-      val step = Interval(1E-6, 0.01)
+
+      // The radius of the spatial filter used to determine point density.
       val densityRadius = 0.005
-      
-      println("Loading Most Central People...")
-      val centrality = readMostCentralXML
 
-      // Bundle it...
-      for (frame <- 60 until 3099 by 1) {
-        println
-        println("------ Frame " + frame + " ------")
-        val (stamp, interval, avgBiSent) = readBundleSentimentSamplesXML(xmldir, prefix, frame)
-        for (term <- bundleTerms) {
-          val attrIndices = extractAttrs(maxEdges, term, bundleTerms, avgBiSent)
-          println("Non-Zero " + term + " Edges: " + attrIndices.size)
-          if (!attrIndices.isEmpty) {
-            val bundler = buildBundler(centrality, avgBiSent, attrIndices, radius)
-            val attrs = attrIndices.map(ai => (ai.sendAttr, ai.recvAttr))
+      for (term <- bundleTerms) {
+    	val outfix = prefix + "-smooth-" + term
+        val baq: Queue[(Bundler, Array[AttrIndex])] = Queue()
+        for (frame <- 60 until 3099 by 1) {
+          val ba @ (bundler, attrIndices) = readBundlerAttrsXML(xmldir + prefix, prefix + "-" + term, frame)
+          baq.enqueue(ba)
+          if (baq.size > window)
+            baq.dequeue
+          if (baq.size == window) {
+            println
+            println("------ Frame " + frame + " ------")
 
-            bundler.prepare
-            for (i <- 0 until iterations) {
-              if (debug) generateBundleGeo(geodir, "iter." + i + "." + term, frame, bundler, attrs, densityRadius)
-              bundler.iterate(springConst, electroConst, radius, minCompat, Some(attrs), converge, step)
+            val bundlers = baq.map{ case (b, _) => b}.toArray
+            val battrs = baq.map{ case (_, a) => a}.toArray
+
+            // SenderID -> ReceiverID -> List(Bundler Index, Edge Index)
+            val edgeIndices = HashMap[Long, HashMap[Long, List[(Int, Int)]]]()
+            for (((_, attrIndices), bi) <- baq.zipWithIndex) {
+              for ((attri, ai) <- attrIndices.zipWithIndex) {
+                val rm = edgeIndices.getOrElseUpdate(attri.sendID, HashMap())
+                rm += (attri.recvID -> ((bi, ai) :: rm.getOrElseUpdate(attri.recvID, List())))
+              }
             }
 
-            writeBundlerAttrsXML(xmldir + prefix, prefix + "-" + term, frame, bundler, attrIndices)
-            if(genGeo) generateBundleGeo(geodir, prefix + "-" + term, frame, bundler, attrs, densityRadius)
+            val numEdges = edgeIndices.values.map(_.size).reduce(_ + _)
+            val sbundler = Bundler(numEdges)
+            val sattrs = Array.fill(numEdges)((0.0, 0.0))
+
+            var ei = 0
+            for ((sendID, rm) <- edgeIndices) {
+              for ((recvID, ls) <- rm) {                
+                val samples = ls.size.toDouble
+                val numSegs = {
+                  val (qbi, qei) = ls.head
+                  bundlers(qbi).edgeSegs(qei)
+                }
+                
+                sbundler.resizeEdge(ei, numSegs)
+                for(vi <- 0 to numSegs) {
+                  val sp = ls.map {
+                    case (qbi, qei) => bundlers(qbi)(Index2i(qei, vi))
+                  }.map(_.toVec2d).reduce(_ + _).toPos2d
+                  sbundler(Index2i(ei, vi)) = sp / samples
+                }
+                
+                val (s, r) = ls.map {
+                  case (qbi, qei) => battrs(qbi)(qei)
+                }.map(ai => (ai.sendAttr, ai.recvAttr))
+                .reduce((a: (Double, Double), b: (Double, Double)) => (a, b) match {
+                  case ((ar, as), (br, bs)) => (ar+br, as+bs)
+                }) 
+                sattrs(ei) = (s / samples, r / samples)
+                
+                ei = ei + 1
+              }
+            }
+
+            generateBundleGeo(geodir, outfix, frame-filterWidth, sbundler, sattrs, densityRadius)
             println
           }
         }
@@ -98,7 +119,7 @@ object BundleEdgesApp
   /** Construct a bundler with edges for each AverageBiSentiment.
     * @return (Bundler, (SendID, RecvID) Edge Indices)
     */
-  def buildBundler(centrality: TreeMap[Long,PersonalCentrality],
+  def buildBundler(centrality: TreeMap[Long, PersonalCentrality],
                    avgBiSent: HashMap[Long, HashMap[Long, AverageBiSentiment]],
                    attrIndices: Array[AttrIndex],
                    radius: Double): Bundler = {
@@ -107,7 +128,7 @@ object BundleEdgesApp
 
     val tpi = Pi * 2.0
     val tm = tpi / 180.0
-    
+
     val total = centrality.values.map(_.normScore).reduce(_ + _)
 
     // Angles for center of each person ID.
@@ -142,7 +163,7 @@ object BundleEdgesApp
 
     def f(snt: AverageSentiment): Double = {
       val sum = bundleTerms.map(snt.freq(_)).reduce(_ + _)
-      if(sum > 0.0) snt.freq(term) / sum else 0.0 
+      if (sum > 0.0) snt.freq(term) / sum else 0.0
     }
 
     var rtn = TreeSet[AttrIndex]()

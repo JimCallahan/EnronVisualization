@@ -20,18 +20,21 @@ object GenerateRingsApp
   /** Top level method. */
   def main(args: Array[String]) {
     try {
+      // Prefix for the family of files read and written.
+      val prefix = "samples6h60fw"
+        
       // The directory to write Houdini GEO format files.
-      val geodir = Path("./artwork/houdini/geo/interpBundles")
+      val geodir = Path("./artwork/houdini/geo") + prefix
 
       // The directory to write Houdini HScript format files.
       val hsdir = Path("./artwork/houdini/hscript")
 
       // The directory from which to read XML format files.
-      val xmldir = Path("./data/xml")
+      val xmldir = Path("./data/xml") 
 
       // The financial terms we are interested in bundling. 
       import FinancialTerm._
-      val bundleTerms = Array(Litigious, ModalStrong, Negative, Positive, Uncertainty)
+      val bundleTerms = Array(Litigious, Negative, Positive, Uncertainty)
 
       println("Generating Per-Person Ring Geometry...")
       val centrality = readMostCentralXML
@@ -41,8 +44,8 @@ object GenerateRingsApp
       generateArcGeo(geodir, "personalLabelSideRing", centrality, 1.0, 1.025, 0.001)
 
       var prevTotals = Array.fill(centrality.size)(AverageSentiment())
-      for (frame <- 30 until 1545 by 1) {
-        val (_, _, avgBiSent) = readBundleSentimentSamplesXML(xmldir, "averageBiSentimentSample", frame)
+      for (frame <- 60 until 3099 by 1) {
+        val (_, _, avgBiSent) = readBundleSentimentSamplesXML(xmldir, prefix, frame)
 
         val totals = {
           val rtn = Array.fill(centrality.size)(AverageSentiment())
@@ -53,7 +56,7 @@ object GenerateRingsApp
               bitotal += (rid -> (bitotal.getOrElse(rid, AverageSentiment()) + snt.recv))
             }
           }
-          for ((person, i) <- centrality.zipWithIndex) {
+          for ((person, i) <- centrality.values.zipWithIndex) {
             val snt = bitotal.getOrElse(person.pid, AverageSentiment())
             rtn(i) = snt.normalize(bundleTerms.map(snt.freq(_)).reduce(_ + _))
           }
@@ -95,7 +98,7 @@ object GenerateRingsApp
     */
   def generateArcGeo(outdir: Path,
                      prefix: String,
-                     centrality: TreeSet[PersonalCentrality],
+                     centrality: TreeMap[Long,PersonalCentrality],
                      innerRadius: Double,
                      outerRadius: Double,
                      gap: Double,
@@ -109,7 +112,7 @@ object GenerateRingsApp
     try {
       val tpi = Pi * 2.0
       val tm = tpi / 180.0
-      val total = centrality.toList.map(_.normScore).reduce(_ + _)
+      val total = centrality.values.map(_.normScore).reduce(_ + _)
 
       var pts: List[Pos2d] = List()
       var idxs: List[(Index3i, Int)] = List()
@@ -131,7 +134,7 @@ object GenerateRingsApp
       val tgap = gap * tpi
 
       var off = 0.0
-      for ((cent, i) <- centrality.zipWithIndex) {
+      for ((cent, i) <- centrality.values.zipWithIndex) {
         val List(ts, te) = List(off, off + cent.normScore).map(_ * (tpi / total))
         arc(ts + tgap, te - tgap, innerRadius, outerRadius, i)
         off = off + cent.normScore
@@ -176,7 +179,7 @@ object GenerateRingsApp
   def generatePersonalLabelsHScript(outdir: Path,
                                     prefix: String,
                                     sopName: String,
-                                    centrality: TreeSet[PersonalCentrality],
+                                    centrality: TreeMap[Long,PersonalCentrality],
                                     people: TreeMap[Long, Person]) {
 
     import scala.math.{ ceil, log, Pi }
@@ -184,7 +187,7 @@ object GenerateRingsApp
     println("  Writing: " + path)
     val out = new BufferedWriter(new FileWriter(path.toFile))
     try {
-      val total = centrality.toList.map(_.normScore).reduce(_ + _)
+      val total = centrality.values.map(_.normScore).reduce(_ + _)
       val r = 1.07
 
       out.write("opcf /obj\n" +
@@ -196,7 +199,7 @@ object GenerateRingsApp
 
       var off = 0.0
       var cnt = 1
-      for (pc <- centrality) {
+      for (pc <- centrality.values) {
         val tm = ((off.toDouble + pc.normScore * 0.5) * 360.0) / total
 
         val label = {
