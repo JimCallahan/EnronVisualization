@@ -7,7 +7,7 @@ import org.scalagfx.houdini.geo.attr.{ PointFloatAttr, PrimitiveFloatAttr }
 
 import scala.xml.{ PrettyPrinter, XML }
 import scala.collection.immutable.{ TreeSet, TreeMap }
-import scala.collection.mutable.{ HashMap, HashSet }
+import scala.collection.mutable.{ HashMap, HashSet, Queue }
 import scala.math.{ E, pow, log }
 
 import java.io.{ BufferedWriter, BufferedReader, FileWriter, FileReader, IOException }
@@ -22,7 +22,7 @@ object GenerateRingsApp
     try {
       // Prefix for the family of files read and written.
       val prefix = "samples6h60fw"
-        
+
       // The directory to write Houdini GEO format files.
       val geodir = Path("./artwork/houdini/geo") + prefix
 
@@ -30,47 +30,98 @@ object GenerateRingsApp
       val hsdir = Path("./artwork/houdini/hscript")
 
       // The directory from which to read XML format files.
-      val xmldir = Path("./data/xml") 
+      val xmldir = Path("./data/xml")
 
       // The financial terms we are interested in bundling. 
       import FinancialTerm._
       val bundleTerms = Array(Litigious, Negative, Positive, Uncertainty)
+      val termOffset =
+        TreeMap(Litigious -> Index2i(1, 0), Uncertainty -> Index2i(1, 1),
+          Negative -> Index2i(0, 0), Positive -> Index2i(0, 1))
 
       println("Generating Per-Person Ring Geometry...")
       val centrality = readMostCentralXML
       val people = readPeopleXML(centrality)
       generatePersonalLabelsHScript(hsdir, "personalLabels", "PeopleLabels", centrality, people)
-      generateArcGeo(geodir, "personalLabelRing", centrality, 1.0, 1.0075, 0.0005)
+      generateArcGeo(geodir, "personalLabelRing", centrality, 1.0, 1.0075, 0.00075)
       generateArcGeo(geodir, "personalLabelSideRing", centrality, 1.0, 1.025, 0.001)
 
-      var prevTotals = Array.fill(centrality.size)(AverageSentiment())
-      for (frame <- 60 until 3099 by 1) {
-        val (_, _, avgBiSent) = readBundleSentimentSamplesXML(xmldir, prefix, frame)
+      // The sampling window (in frames).
+      val filterWidth = 30
+      val window = filterWidth * 2 + 1
 
-        val totals = {
-          val rtn = Array.fill(centrality.size)(AverageSentiment())
-          val bitotal = HashMap[Long, AverageSentiment]()
-          for ((sid, rm) <- avgBiSent) {
-            for ((rid, snt) <- rm) {
-              bitotal += (sid -> (bitotal.getOrElse(sid, AverageSentiment()) + snt.send))
-              bitotal += (rid -> (bitotal.getOrElse(rid, AverageSentiment()) + snt.recv))
+      // The radius of the spatial filter used to determine point density.
+      val densityRadius = 0.005
+
+      for (term <- bundleTerms) {
+        val outfix = prefix + "-smooth-" + term
+        val dattrName = Some(term.toString.toLowerCase + "dt")
+        val aq: Queue[Array[AttrIndex]] = Queue()
+        for (frame <- 60 until 3099 by 1) { 
+          val (_, attrIndices) = readBundlerAttrsXML(xmldir + prefix, prefix + "-" + term, frame)
+          aq.enqueue(attrIndices)
+          if (aq.size > window)
+            aq.dequeue
+          if (aq.size == window) {
+            println
+            println("------ Frame " + frame + " ------")
+
+            val battrs = aq.toArray
+
+            // SenderID -> ReceiverID -> List(Bundler Index, Edge Index)
+            val edgeIndices = HashMap[Long, HashMap[Long, List[(Int, Int)]]]()
+            for ((attrIndices, bi) <- aq.zipWithIndex) {
+              for ((attri, ai) <- attrIndices.zipWithIndex) {
+                val rm = edgeIndices.getOrElseUpdate(attri.sendID, HashMap())
+                rm += (attri.recvID -> ((bi, ai) :: rm.getOrElseUpdate(attri.recvID, List())))
+              }
             }
-          }
-          for ((person, i) <- centrality.values.zipWithIndex) {
-            val snt = bitotal.getOrElse(person.pid, AverageSentiment())
-            rtn(i) = snt.normalize(bundleTerms.map(snt.freq(_)).reduce(_ + _))
-          }
-          rtn
-        }
 
-        for (term <- bundleTerms) {
-          val dprefix = "deriv-" + term + ".%04d".format(frame)
-          val dattrName = Some(term.toString.toLowerCase + "dt")
-          generateArcGeo(geodir, dprefix, centrality, 1.035, 1.1, 0.001, dattrName,
-            Some((totals zip prevTotals).map { case (a, b) => a.freq(term) - b.freq(term) }))
-        }
+            // Sender ID -> Total Attr Derivative
+            var sattrs = TreeMap[Long, Double]()
+            for ((sendID, rm) <- edgeIndices) {
+              val dts =
+                for ((recvID, ls) <- rm) yield {
+                  def f(qi: (Int, Int)): Double = {
+                    val (qbi, qei) = qi
+                    val ai = battrs(qbi)(qei)
+                    ai.sendAttr
+                  }
+                  (f(ls.last) - f(ls.head)) / ls.size.toDouble
+                }
+              sattrs = sattrs + (sendID -> dts.reduce(_ + _))
+            }
 
-        prevTotals = totals
+            // Sender ID -> Total Attr Derivative
+            var rattrs = TreeMap[Long, Double]()
+            for ((sendID, rm) <- edgeIndices) {
+              for ((recvID, ls) <- rm) yield {
+                def f(qi: (Int, Int)): Double = {
+                  val (qbi, qei) = qi
+                  val ai = battrs(qbi)(qei)
+                  ai.recvAttr
+                }
+                val rdt = (f(ls.last) - f(ls.head)) / ls.size.toDouble
+                rattrs = rattrs + (recvID -> (rattrs.getOrElse(recvID, 0.0) + rdt))
+              }
+            }
+
+            val sprefix = "sendDT-" + term + ".%04d".format(frame - filterWidth)
+            generateArcGeo(geodir, sprefix, centrality, 1.035, 1.1, 0.001,
+              attrName = dattrName,
+              attrs = Some(centrality.keySet.toArray.map(sattrs.getOrElse(_, 0.0))))
+
+            val rprefix = "recvDT-" + term + ".%04d".format(frame - filterWidth)
+            generateArcGeo(geodir, rprefix, centrality, 1.11, 1.175, 0.001,
+              attrName = dattrName,
+              attrs = Some(centrality.keySet.toArray.map(rattrs.getOrElse(_, 0.0))))
+
+            val cprefix = "totalDT-" + term + ".%04d".format(frame - filterWidth)
+            generateArcGeo(geodir, cprefix, centrality, 1.01, 1.09, 0.00075, rgap = 0.0025, 
+              subOffset = termOffset(term), subRange = Index2i(2), attrName = dattrName, 
+              attrs = Some(centrality.keySet.toArray.map(i => sattrs.getOrElse(i, 0.0) + rattrs.getOrElse(i, 0.0))))
+          }
+        }
       }
 
       println
@@ -98,10 +149,13 @@ object GenerateRingsApp
     */
   def generateArcGeo(outdir: Path,
                      prefix: String,
-                     centrality: TreeMap[Long,PersonalCentrality],
+                     centrality: TreeMap[Long, PersonalCentrality],
                      innerRadius: Double,
                      outerRadius: Double,
                      gap: Double,
+                     rgap: Double = 0.0,
+                     subOffset: Index2i = Index2i(0),
+                     subRange: Index2i = Index2i(1),
                      attrName: Option[String] = None,
                      attrs: Option[Array[Double]] = None) {
 
@@ -135,8 +189,16 @@ object GenerateRingsApp
 
       var off = 0.0
       for ((cent, i) <- centrality.values.zipWithIndex) {
-        val List(ts, te) = List(off, off + cent.normScore).map(_ * (tpi / total))
-        arc(ts + tgap, te - tgap, innerRadius, outerRadius, i)
+        val List(ts, te) =
+          List(subOffset.x, subOffset.x + 1)
+            .map(_.toDouble * (cent.normScore / subRange.x.toDouble) + off)
+            .map(_ * (tpi / total))
+        val List(ir, or) =
+          List(subOffset.y, subOffset.y + 1)
+            .map(_.toDouble / subRange.y.toDouble)
+            .map(Scalar.lerp(innerRadius, outerRadius, _))
+        val (gs, ge) = (if(subOffset.x == 0) 1.0 else 0.5, if(subOffset.x == subRange.x-1) 1.0 else 0.5)    
+        arc(ts + tgap*gs, te - tgap*ge, ir + rgap, or - rgap, i)
         off = off + cent.normScore
       }
 
@@ -179,7 +241,7 @@ object GenerateRingsApp
   def generatePersonalLabelsHScript(outdir: Path,
                                     prefix: String,
                                     sopName: String,
-                                    centrality: TreeMap[Long,PersonalCentrality],
+                                    centrality: TreeMap[Long, PersonalCentrality],
                                     people: TreeMap[Long, Person]) {
 
     import scala.math.{ ceil, log, Pi }
